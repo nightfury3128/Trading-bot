@@ -13,7 +13,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from supabase import create_client
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+_dotenv_path = Path(__file__).resolve().parent / ".env"
+if _dotenv_path.exists():
+    load_dotenv(_dotenv_path)
 try:
     from discord import (
         discord_error,
@@ -32,8 +34,9 @@ SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
 SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError(
-        "Set SUPABASE_URL and SUPABASE_KEY in a .env file (see .env.example) "
-        "or export them in the environment."
+        "Missing SUPABASE_URL / SUPABASE_KEY. "
+        "Set them as environment variables (recommended for GitHub Actions Secrets), "
+        "or create a local .env (see .env.example)."
     )
 
 STOP_LOSS = 0.95

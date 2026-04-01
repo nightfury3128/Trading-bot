@@ -18,12 +18,14 @@ from supabase import create_client
 
 
 def main() -> None:
-    load_dotenv(Path(__file__).resolve().parent / ".env")
+    dotenv_path = Path(__file__).resolve().parent / ".env"
+    if dotenv_path.exists():
+        load_dotenv(dotenv_path)
     url = (os.environ.get("SUPABASE_URL") or "").strip()
     key = (os.environ.get("SUPABASE_KEY") or "").strip()
     if not url or not key:
         print(
-            "Set SUPABASE_URL and SUPABASE_KEY in .env (see .env.example).",
+            "Missing SUPABASE_URL / SUPABASE_KEY (set env vars or create .env; see .env.example).",
             file=sys.stderr,
         )
         sys.exit(1)
