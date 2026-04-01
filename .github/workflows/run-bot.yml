@@ -3,6 +3,7 @@ name: Run trading bot
 on:
   workflow_dispatch:
   schedule:
+    - cron: "*/5 * * * *"
     # Market open (9:30 AM ET ≈ 13:30 UTC)
     - cron: "30 13 * * 1-5"
 
@@ -33,4 +34,4 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run bot
-        run: python main.py
+        run: python main.py 
