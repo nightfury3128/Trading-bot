@@ -1,0 +1,7 @@
+python-dotenv
+supabase
+pandas
+yfinance
+scikit-learn
+requests
+streamlit
