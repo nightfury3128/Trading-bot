@@ -3,19 +3,22 @@ import os
 import re
 import time
 import urllib.request
+import warnings
 from pathlib import Path
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from supabase import create_client
 
 _dotenv_path = Path(__file__).resolve().parent / ".env"
 if _dotenv_path.exists():
     load_dotenv(_dotenv_path)
+
 try:
     from discord import (
         discord_error,
@@ -29,31 +32,42 @@ except Exception:
     discord_portfolio_summary = None
     discord_trade_alert = None
 
+# Silence noisy ResourceWarnings (common with yfinance/threads)
+warnings.filterwarnings("ignore", category=ResourceWarning)
+
 # ===== CONFIG =====
 SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
 SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
+
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "Missing SUPABASE_URL / SUPABASE_KEY. "
-        "Set them as environment variables (recommended for GitHub Actions Secrets), "
-        "or create a local .env (see .env.example)."
-    )
+    raise RuntimeError("Missing SUPABASE_URL / SUPABASE_KEY.")
 
 STOP_LOSS = 0.95
-MIN_HOLD_DAYS = 3
+TAKE_PROFIT = 1.10
+MIN_HOLD_DAYS = 3       # Rule 11: prefer 3
+MIN_REBUY_DAYS = 5      # Rule 6
 MAX_POSITIONS = 5
-# Return-regression BUY: keep positive predicted-return names, cap at N candidates
-TOP_BUY_PICKS = 3
-FUTURE_RETURN_DAYS = 5
-MIN_PREDICTED_RETURN = 0.0
+TOP_BUY_PICKS = 5       # Rule 7: top 3-5
+FUTURE_RETURN_DAYS = 5  # Rule 2
+MIN_PREDICTED_RETURN = 0.0 # Rule 7
+
+# Transaction Costs (Rule 9)
+COST_BUY = 1.001
+COST_SELL = 0.999
 
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-FILTER_PERIOD = "3mo"
-MIN_FILTER_ROWS = 50
+FILTER_PERIOD = "6mo"    # Increased to ensure enough data for MA200 SPY and features
+MIN_FILTER_ROWS = 100
 MIN_AVG_VOLUME = 1_000_000
 TOP_ML_COUNT = 50
 BULK_CHUNK = 120
 MAX_ML_WORKERS = 16
+
+FEATURE_COLUMNS = [
+    "returns", "MA20", "MA50", "momentum_5", "momentum_10", 
+    "momentum_20", "volatility_10", "volatility_20", 
+    "volume_change", "ma_ratio", "price_vs_ma"
+]
 
 _LOG_LEVEL = getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
@@ -61,838 +75,401 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-# Keep external libraries quiet unless they emit warnings/errors.
 for noisy_logger in ("yfinance", "httpx", "httpcore", "hpack", "peewee"):
     logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 log = logging.getLogger("trading_bot")
 
 # ===== CONNECT =====
-log.debug("Initializing Supabase client (url=%s)", SUPABASE_URL[:32] + "…")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ===== HELPERS =====
-def _t0():
-    return time.perf_counter()
-
-def _dt(start):
-    return (time.perf_counter() - start) * 1000.0
+def _t0(): return time.perf_counter()
+def _dt(start): return (time.perf_counter() - start) * 1000.0
 
 def days_since(date_str):
-    d1 = datetime.strptime(date_str, "%Y-%m-%d")
-    d = (datetime.now() - d1).days
-    log.debug("days_since(%s) -> %s", date_str, d)
-    return d
+    try:
+        d1 = datetime.strptime(date_str, "%Y-%m-%d")
+        return (datetime.now() - d1).days
+    except:
+        return 0
 
 def log_trade(action, ticker, price, shares):
-    log.info(
-        "TRADE db insert: action=%s ticker=%s price=%.6f shares=%s",
-        action,
-        ticker,
-        float(price),
-        shares,
-    )
-    if discord_trade_alert is not None:
+    log.info("TRADE: action=%s ticker=%s price=%.6f shares=%s", action, ticker, float(price), shares)
+    if discord_trade_alert:
         try:
-            discord_trade_alert(action, ticker, float(price), int(shares))
+            discord_trade_alert(action, ticker, float(price), float(shares))
         except Exception as e:
             log.debug("discord_trade_alert failed: %s", e)
-    t_s = _t0()
-    res = supabase.table("trades").insert({
+    
+    supabase.table("trades").insert({
         "date": datetime.now().strftime("%Y-%m-%d"),
         "action": action,
         "ticker": ticker,
         "price": float(price),
-        "shares": shares
+        "shares": float(shares)
     }).execute()
-    log.debug("log_trade execute took %.2f ms", _dt(t_s))
-    if not (res.data or []):
-        log.error("trades insert returned empty data")
-        raise RuntimeError(
-            "trades insert returned no rows — check RLS INSERT on `trades` and column types."
-        )
-    log.debug("trades insert response rows=%s", len(res.data or []))
 
 def get_account():
-    t_s = _t0()
     res = supabase.table("account").select("*").eq("id", 1).execute()
-    log.debug("get_account query %.2f ms", _dt(t_s))
-    rows = res.data or []
-    if not rows:
-        raise RuntimeError(
-            "account query returned no rows for id=1. "
-            "Add a row in Supabase (table `account`, id=1 with cash), "
-            "or fix Row Level Security so your key can SELECT that row."
-        )
-    log.info("get_account id=1 cash=%s keys=%s", rows[0].get("cash"), list(rows[0].keys()))
-    return rows[0]
+    if not res.data:
+        raise RuntimeError("Account id=1 not found.")
+    return res.data[0]
 
 def update_cash(new_cash):
-    log.info("update_cash new_cash=%.6f", float(new_cash))
-    t_s = _t0()
-    res = (
-        supabase.table("account")
-        .update({"cash": float(new_cash)})
-        .eq("id", 1)
-        .execute()
-    )
-    log.debug("update_cash execute %.2f ms", _dt(t_s))
-    if not (res.data or []):
-        raise RuntimeError(
-            "account update changed 0 rows — check id=1 exists and RLS allows UPDATE on `account`."
-        )
-    log.debug("update_cash returned %s row(s)", len(res.data or []))
+    supabase.table("account").update({"cash": float(new_cash)}).eq("id", 1).execute()
 
 def get_portfolio():
-    t_s = _t0()
-    data = supabase.table("portfolio").select("*").execute().data or []
-    log.debug("get_portfolio %.2f ms count=%s", _dt(t_s), len(data))
-    if data:
-        log.debug("portfolio tickers: %s", [p.get("ticker") for p in data])
-    return data
+    return supabase.table("portfolio").select("*").execute().data or []
 
 def add_position(ticker, shares, price):
-    log.info("add_position ticker=%s shares=%s price=%.6f", ticker, shares, float(price))
-    t_s = _t0()
-    res = supabase.table("portfolio").insert({
+    supabase.table("portfolio").insert({
         "ticker": ticker,
-        "shares": shares,
+        "shares": float(shares),
         "buy_price": float(price),
         "buy_date": datetime.now().strftime("%Y-%m-%d")
     }).execute()
-    log.debug("add_position execute %.2f ms", _dt(t_s))
-    if not (res.data or []):
-        log.error("portfolio insert empty for ticker=%s", ticker)
-        raise RuntimeError(
-            "portfolio insert returned no rows — check RLS INSERT on `portfolio`."
-        )
 
 def remove_position(ticker):
-    log.info("remove_position ticker=%s", ticker)
-    t_s = _t0()
     supabase.table("portfolio").delete().eq("ticker", ticker).execute()
-    log.debug("remove_position %.2f ms", _dt(t_s))
 
-# ===== UNIVERSE (S&P 500 from Wikipedia) =====
+def get_recent_sells():
+    """Rule 6: Track last sell date per ticker from trades table."""
+    try:
+        five_days_ago = (datetime.utcnow() - timedelta(days=6)).strftime("%Y-%m-%d")
+        res = supabase.table("trades") \
+            .select("ticker,date") \
+            .filter("action", "in", '("SELL","STOP_LOSS","TAKE_PROFIT")') \
+            .gte("date", five_days_ago) \
+            .execute()
+        return {r["ticker"] for r in (res.data or [])}
+    except Exception as e:
+        log.warning("get_recent_sells failed: %s", e)
+        return set()
+
+def get_market_regime():
+    """Rule 3: SPY MA50 vs MA200 filter."""
+    try:
+        spy = yf.download("SPY", period="2y", progress=False)
+        if spy.empty: return True
+        spy["MA50"] = spy["Close"].rolling(50).mean()
+        spy["MA200"] = spy["Close"].rolling(200).mean()
+        ma50 = spy["MA50"].iloc[-1]
+        ma200 = spy["MA200"].iloc[-1]
+        log.info("Market Regime: SPY MA50=%.2f, MA200=%.2f", ma50, ma200)
+        return ma50 >= ma200
+    except Exception as e:
+        log.warning("Market regime check failed: %s", e)
+        return True
+
+# ===== DATA / ML =====
 def fetch_sp500_tickers():
-    """Scrape S&P 500 tickers from Wikipedia; symbols normalized for Yahoo (e.g. BRK.B → BRK-B)."""
-    log.info("fetch_sp500_tickers: GET %s", SP500_WIKI_URL)
-    t_s = _t0()
-    req = urllib.request.Request(
-        SP500_WIKI_URL,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; research/1.0)"},
-    )
+    log.info("Fetching S&P 500 tickers...")
+    req = urllib.request.Request(SP500_WIKI_URL, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         html = resp.read().decode("utf-8", errors="replace")
-    log.debug("Wikipedia HTML length=%s chars, fetch+decode %.2f ms", len(html), _dt(t_s))
     start = html.find('id="constituents"')
-    if start == -1:
-        raise RuntimeError('Could not find id="constituents" table on Wikipedia page.')
     end = html.find("</table>", start)
     blob = html[start:end]
-    raw = re.findall(
-        r"<tr>\s*<td>\s*<a[^>]*>([A-Za-z0-9.\-]+)</a>",
-        blob,
-    )
-    seen: set[str] = set()
-    out: list[str] = []
-    for s in raw:
-        sym = str(s).strip().upper().replace(".", "-")
-        if sym and sym not in seen:
-            seen.add(sym)
-            out.append(sym)
-    if len(out) < 400:
-        raise RuntimeError(f"Unexpected symbol count ({len(out)}); Wikipedia layout may have changed.")
-    log.info("fetch_sp500_tickers: parsed %s unique symbols (first=%s last=%s)", len(out), out[0], out[-1])
-    log.debug("SP500 sample head: %s", out[:10])
-    return out
+    raw = re.findall(r"<tr>\s*<td>\s*<a[^>]*>([A-Za-z0-9.\-]+)</a>", blob)
+    return sorted(list(set(s.strip().upper().replace(".", "-") for s in raw)))
 
 def split_bulk_ohlcv(raw: pd.DataFrame, tickers: list) -> dict[str, pd.DataFrame]:
-    """Split a multi-ticker yfinance download into per-ticker OHLCV frames."""
-    out: dict[str, pd.DataFrame] = {}
-    if raw is None or raw.empty:
-        log.debug("split_bulk_ohlcv: empty raw for tickers chunk len=%s", len(tickers))
-        return out
+    out = {}
+    if raw is None or raw.empty: return out
     if not isinstance(raw.columns, pd.MultiIndex):
-        if len(tickers) == 1 and "Close" in raw.columns:
-            sub = raw.dropna(how="all")
-            if not sub.empty:
-                out[tickers[0]] = sub
+        if len(tickers) == 1: out[tickers[0]] = raw.dropna(how="all")
         return out
     level0 = raw.columns.get_level_values(0)
     for t in tickers:
-        try:
-            if t in level0:
-                sub = raw[t].dropna(how="all")
-                if not sub.empty and "Close" in sub.columns:
-                    out[t] = sub
-        except Exception:
-            continue
-    missing = [x for x in tickers if x not in out]
-    log.debug(
-        "split_bulk_ohlcv: extracted %s/%s tickers; missing_sample=%s",
-        len(out),
-        len(tickers),
-        missing[:15],
-    )
+        if t in level0:
+            sub = raw[t].dropna(how="all")
+            if not sub.empty: out[t] = sub
     return out
 
 def bulk_download_by_ticker(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
-    """Chunked bulk download; returns {ticker: ohlcv DataFrame}."""
-    result: dict[str, pd.DataFrame] = {}
-    if not tickers:
-        log.warning("bulk_download_by_ticker: empty ticker list period=%s", period)
-        return result
-    log.info(
-        "bulk_download_by_ticker: %s tickers period=%s chunk=%s",
-        len(tickers),
-        period,
-        BULK_CHUNK,
-    )
-    t_all = _t0()
-    n_chunks = (len(tickers) + BULK_CHUNK - 1) // BULK_CHUNK
-    for ci, i in enumerate(range(0, len(tickers), BULK_CHUNK)):
+    result = {}
+    if not tickers: return result
+    for i in range(0, len(tickers), BULK_CHUNK):
         chunk = tickers[i : i + BULK_CHUNK]
-        t_ch = _t0()
-        log.debug(
-            "yfinance chunk %s/%s index=%s size=%s sample=%s",
-            ci + 1,
-            n_chunks,
-            i,
-            len(chunk),
-            chunk[:5],
-        )
         try:
-            raw = yf.download(
-                chunk,
-                period=period,
-                group_by="ticker",
-                progress=False,
-                threads=True,
-            )
+            raw = yf.download(chunk, period=period, group_by="ticker", progress=False, threads=True)
+            result.update(split_bulk_ohlcv(raw, chunk))
         except Exception as e:
-            log.exception("bulk download failed chunk index=%s: %s", i, e)
-            continue
-        log.debug("yfinance chunk %s download %.2f ms shape=%s", ci + 1, _dt(t_ch), getattr(raw, "shape", None))
-        before = len(result)
-        result.update(split_bulk_ohlcv(raw, chunk))
-        log.debug("chunk %s added %s tickers (total keys=%s)", ci + 1, len(result) - before, len(result))
-    log.info(
-        "bulk_download_by_ticker done: period=%s collected=%s/requested=%s in %.2f ms",
-        period,
-        len(result),
-        len(tickers),
-        _dt(t_all),
-    )
+            log.warning("Bulk download failed for chunk: %s", e)
     return result
 
-def momentum_and_filter_stats(ohlcv: pd.DataFrame):
-    """Return 20-day momentum if row count, volume, and momentum pass; else None."""
-    try:
-        if ohlcv is None or ohlcv.empty:
-            return None
-        if "Close" not in ohlcv.columns or "Volume" not in ohlcv.columns:
-            return None
-        sub = ohlcv.dropna(subset=["Close", "Volume"])
-        if len(sub) < MIN_FILTER_ROWS:
-            return None
-        avg_vol = float(sub["Volume"].mean())
-        if avg_vol <= MIN_AVG_VOLUME:
-            return None
-        close = sub["Close"].astype(float)
-        if len(close) < 21:
-            return None
-        mom = float(close.iloc[-1] / close.iloc[-21] - 1.0)
-        if mom <= 0:
-            return None
-        return mom
-    except Exception:
-        return None
-
-def momentum_filter_detail(ticker: str, ohlcv: pd.DataFrame) -> tuple[float | None, str]:
-    """Same gates as momentum_and_filter_stats, but return a reason string for logging."""
-    try:
-        if ohlcv is None or ohlcv.empty:
-            return None, "empty_ohlcv"
-        if "Close" not in ohlcv.columns:
-            return None, "no_close"
-        if "Volume" not in ohlcv.columns:
-            return None, "no_volume"
-        sub = ohlcv.dropna(subset=["Close", "Volume"])
-        n = len(sub)
-        if n < MIN_FILTER_ROWS:
-            return None, f"rows_{n}<{MIN_FILTER_ROWS}"
-        avg_vol = float(sub["Volume"].mean())
-        if avg_vol <= MIN_AVG_VOLUME:
-            return None, f"avg_volume_{avg_vol:.0f}<={MIN_AVG_VOLUME}"
-        close = sub["Close"].astype(float)
-        if len(close) < 21:
-            return None, f"close_len_{len(close)}<21"
-        mom = float(close.iloc[-1] / close.iloc[-21] - 1.0)
-        if mom <= 0:
-            return None, f"non_positive_momentum_{mom:.6f}"
-        return mom, f"ok_mom={mom:.6f}"
-    except Exception as e:
-        return None, f"exception:{type(e).__name__}:{e}"
-
-def filter_universe_ranked(ohlcv_map: dict[str, pd.DataFrame]) -> list[tuple[str, float]]:
-    ranked: list[tuple[str, float]] = []
-    reason_counts: dict[str, int] = {}
-    t_s = _t0()
-    for t, df in ohlcv_map.items():
-        try:
-            mom, reason = momentum_filter_detail(t, df)
-            if mom is not None:
-                ranked.append((t, mom))
-                log.debug("FILTER pass %s %s", t, reason)
-            else:
-                reason_counts[reason] = reason_counts.get(reason, 0) + 1
-                log.debug("FILTER reject %s: %s", t, reason)
-        except Exception as e:
-            log.debug("FILTER reject %s: outer_exception %s", t, e)
-            reason_counts["outer_exception"] = reason_counts.get("outer_exception", 0) + 1
-    ranked.sort(key=lambda x: -x[1])
-    log.info(
-        "filter_universe_ranked: pass=%s reject=%s in %.2f ms",
-        len(ranked),
-        len(ohlcv_map) - len(ranked),
-        _dt(t_s),
-    )
-    log.debug("filter rejection histogram: %s", dict(sorted(reason_counts.items(), key=lambda x: -x[1])[:25]))
-    if ranked:
-        log.info("top 10 momentum: %s", [(a, f"{b:.4f}") for a, b in ranked[:10]])
-    return ranked
-
-# ===== DATA / ML =====
 def prepare_ml_dataframe(ohlcv: pd.DataFrame) -> pd.DataFrame:
-    """Feature frame for train_and_score (matches original get_data logic)."""
+    """Rule 1 & 2: Feature Engineering & Target Improvement."""
     try:
         df = ohlcv.copy()
-        if df.empty or "Close" not in df.columns:
-            log.debug("prepare_ml_dataframe: empty or no Close, shape=%s", getattr(df, "shape", None))
-            return pd.DataFrame()
-        rows_in = len(df)
+        if df.empty or "Close" not in df.columns: return pd.DataFrame()
+        
+        # Core returns
         df["returns"] = df["Close"].pct_change()
+        
+        # Existing MA
         df["MA20"] = df["Close"].rolling(20).mean()
         df["MA50"] = df["Close"].rolling(50).mean()
-        df["volatility"] = df["returns"].rolling(10).std()
+        
+        # New Features (Rule 1)
+        df["momentum_5"] = df["Close"].pct_change(5)
+        df["momentum_10"] = df["Close"].pct_change(10)
+        df["momentum_20"] = df["Close"].pct_change(20)
+        df["volatility_10"] = df["returns"].rolling(10).std()
+        df["volatility_20"] = df["returns"].rolling(20).std()
+        if "Volume" in df.columns:
+            df["volume_change"] = df["Volume"].pct_change()
+        else:
+            df["volume_change"] = 0
+            
+        # Ratios (Rule 1 / Rule 13 safety)
+        df["ma_ratio"] = df["MA20"] / df["MA50"].replace(0, np.nan)
+        df["price_vs_ma"] = df["Close"] / df["MA20"].replace(0, np.nan)
+        
+        # Target (Rule 2)
         df["target"] = (df["Close"].shift(-FUTURE_RETURN_DAYS) - df["Close"]) / df["Close"]
-        out = df.dropna()
-        log.debug(
-            "prepare_ml_dataframe: rows %s -> %s (after features)",
-            rows_in,
-            len(out),
-        )
+        
+        out = df.dropna(subset=FEATURE_COLUMNS + ["target"])
         return out
     except Exception as e:
-        log.debug("prepare_ml_dataframe failed: %s", e)
+        log.debug("prepare_ml_dataframe error: %s", e)
         return pd.DataFrame()
 
-def get_data(ticker):
-    """Per-ticker 1y download + feature prep (portfolio extras / fallback)."""
-    log.debug("get_data: start ticker=%s", ticker)
-    t_s = _t0()
-    raw = yf.download(
-        [ticker],
-        period="1y",
-        group_by="ticker",
-        progress=False,
-        threads=True,
-    )
-    if raw.empty or (
-        isinstance(raw.columns, pd.MultiIndex)
-        and ticker not in raw.columns.get_level_values(0)
-    ):
-        log.debug("get_data: fallback single-arg download ticker=%s", ticker)
-        raw = yf.download(ticker, period="1y", progress=False)
-    log.debug("get_data: yfinance done ticker=%s in %.2f ms", ticker, _dt(t_s))
-    if isinstance(raw.columns, pd.MultiIndex) and ticker in raw.columns.get_level_values(0):
-        out = prepare_ml_dataframe(raw[ticker])
-    else:
-        out = prepare_ml_dataframe(raw)
-    log.debug("get_data: done ticker=%s ml_rows=%s", ticker, len(out))
-    return out
-
 def train_and_score(df):
-    t_s = _t0()
-    X = df[["returns", "MA20", "MA50", "volatility"]]
+    """Rule 1: Update feature list used in model."""
+    X = df[FEATURE_COLUMNS]
     y = df["target"]
     model = RandomForestRegressor(n_estimators=100, random_state=42)
     model.fit(X, y)
-    pred_return = float(model.predict(X.iloc[-1:])[0])
-    log.debug(
-        "train_and_score: rows=%s X_shape=%s fit+infer %.2f ms pred_return=%.6f",
-        len(df),
-        X.shape,
-        _dt(t_s),
-        pred_return,
-    )
-    return pred_return
+    
+    last_row = df.iloc[-1:]
+    pred_return = float(model.predict(last_row[FEATURE_COLUMNS])[0])
+    
+    # Need volatility_10 for position sizing (Rule 4)
+    vol_10 = float(last_row["volatility_10"].iloc[0])
+    
+    return pred_return, vol_10
 
-def _score_one_ticker_ml(pair: tuple[str, pd.DataFrame]):
+def _score_one_ticker_ml(pair):
     ticker, ohlcv = pair
     try:
-        t_row = len(ohlcv) if ohlcv is not None else 0
-        log.debug("_score_one_ticker_ml start %s ohlcv_rows=%s", ticker, t_row)
         ml_df = prepare_ml_dataframe(ohlcv)
-        if ml_df.empty:
-            return ticker, None, None, ValueError("insufficient rows for ML features")
-        pred_return = train_and_score(ml_df)
-        if not pd.notna(pred_return):
-            return ticker, None, None, ValueError("invalid predicted return")
+        if ml_df.empty: return ticker, None, None, None, "Insufficient data"
+        
+        pred_return, vol_10 = train_and_score(ml_df)
         price = float(ohlcv["Close"].dropna().iloc[-1])
-        log.debug(
-            "_score_one_ticker_ml ok %s pred_return=%.6f price=%.6f",
-            ticker,
-            pred_return,
-            price,
-        )
-        return ticker, pred_return, price, None
+        return ticker, pred_return, vol_10, price, None
     except Exception as e:
-        log.debug("_score_one_ticker_ml fail %s: %s", ticker, e)
-        return ticker, None, None, e
+        return ticker, None, None, None, str(e)
 
-def run_parallel_ml_scoring(
-    ticker_to_ohlcv: dict[str, pd.DataFrame],
-) -> tuple[dict, dict, list]:
-    scores, prices = {}, {}
-    errors = []
-    pairs = [(t, ticker_to_ohlcv[t]) for t in ticker_to_ohlcv if t in ticker_to_ohlcv]
+def run_parallel_ml_scoring(ohlcv_map):
+    scores, vol_map, prices, errors = {}, {}, {}, []
+    pairs = list(ohlcv_map.items())
     if not pairs:
-        log.warning("run_parallel_ml_scoring: no pairs to score")
-        return scores, prices, errors
-    n_workers = min(MAX_ML_WORKERS, len(pairs), (os.cpu_count() or 4) * 2)
-    n_workers = max(1, n_workers)
-    log.info(
-        "run_parallel_ml_scoring: tickers=%s workers=%s cpu_count=%s",
-        len(pairs),
-        n_workers,
-        os.cpu_count(),
-    )
-    t_all = _t0()
+        log.warning("No tickers found to score.")
+        return scores, vol_map, prices, errors
+
+    n_workers = max(1, min(MAX_ML_WORKERS, len(pairs)))
+    
     with ThreadPoolExecutor(max_workers=n_workers) as ex:
         futures = [ex.submit(_score_one_ticker_ml, p) for p in pairs]
         for fut in as_completed(futures):
-            try:
-                ticker, pred_return, price, err = fut.result()
-            except Exception as e:
-                log.exception("ML future crashed: %s", e)
-                errors.append(("?", e))
-                continue
-            if err is not None:
-                errors.append((ticker, err))
-                log.debug("ML error ticker=%s err=%s", ticker, err)
-            elif pred_return is not None and price is not None:
-                scores[ticker] = pred_return
-                prices[ticker] = price
-    log.info(
-        "run_parallel_ml_scoring: done scores=%s errors=%s in %.2f ms",
-        len(scores),
-        len(errors),
-        _dt(t_all),
-    )
-    if scores:
-        best = max(scores.items(), key=lambda x: x[1])
-        log.info("ML best ticker=%s predicted_return=%.6f", best[0], best[1])
-    return scores, prices, errors
-
-def fill_prices_bulk(tickers: list[str], prices: dict[str, float]):
-    """Add latest close for tickers missing from prices (one bulk download)."""
-    need = [t for t in tickers if t not in prices]
-    if not need:
-        log.debug("fill_prices_bulk: nothing missing")
-        return
-    log.info("fill_prices_bulk: fetching %s tickers: %s", len(need), need)
-    ohlcv_map = bulk_download_by_ticker(need, "5d")
-    for t in need:
-        try:
-            df = ohlcv_map.get(t)
-            if df is not None and not df.empty and "Close" in df.columns:
-                px = float(df["Close"].dropna().iloc[-1])
-                prices[t] = px
-                log.debug("fill_prices_bulk: %s close=%.6f", t, px)
-            else:
-                log.debug("fill_prices_bulk: no data for %s", t)
-        except Exception as e:
-            log.debug("fill_prices_bulk: %s failed %s", t, e)
-            continue
+            ticker, pred, vol, px, err = fut.result()
+            if err: errors.append((ticker, err))
+            elif pred is not None:
+                scores[ticker] = pred
+                vol_map[ticker] = vol
+                prices[ticker] = px
+    return scores, vol_map, prices, errors
 
 # ===== MAIN =====
-log.info("========== BOT RUN START %s ==========", datetime.now().isoformat())
-RUN_T0 = _t0()
+def main():
+    log.info("========== BOT RUN START %s ==========", datetime.utcnow().isoformat())
+    
+    # Rule 10: Time-based execution
+    hour_utc = datetime.utcnow().hour
+    MODE = "OPEN" if hour_utc < 16 else "CLOSE"
+    log.info("Time Check: UTC Hour=%d, MODE=%s", hour_utc, MODE)
 
-account = get_account()
-cash = float(account["cash"])
-positions = {p["ticker"]: p for p in get_portfolio()}
-log.info("startup cash=%.6f positions=%s", cash, list(positions.keys()))
+    account = get_account()
+    cash = float(account["cash"])
+    portfolio = get_portfolio()
+    positions = {p["ticker"]: p for p in portfolio}
+    cooldown_tickers = get_recent_sells()
+    market_regime_bullish = get_market_regime()
+    
+    log.info("Startup: cash=%.2f, positions=%s, cooldowns=%s", cash, list(positions.keys()), list(cooldown_tickers))
 
-scores = {}
-prices = {}
-score_errors = []
-
-try:
+    # Data Fetching
     sp500 = fetch_sp500_tickers()
-except Exception as e:
-    log.exception("fetch_sp500 failed")
-    raise RuntimeError(f"Failed to load S&P 500 list from Wikipedia: {e!r}") from e
+    filter_map = bulk_download_by_ticker(sp500, "6mo")
+    
+    # Preliminary Momentum Filter
+    ranked_mom = []
+    for t, df in filter_map.items():
+        if len(df) < 50: continue
+        px = df["Close"].astype(float)
+        mom = float(px.iloc[-1] / px.iloc[-21] - 1.0)
+        if mom > 0: ranked_mom.append((t, mom))
+    
+    ranked_mom.sort(key=lambda x: -x[1])
+    top_tickers = [t for t, _ in ranked_mom[:TOP_ML_COUNT]]
+    
+    # Ensure held positions are also scored
+    ml_list = list(set(top_tickers + list(positions.keys())))
+    ohlcv_1y = bulk_download_by_ticker(ml_list, "1y")
+    
+    scores, vol_map, prices, errors = run_parallel_ml_scoring(ohlcv_1y)
+    
+    if not scores:
+        log.error("No valid ML scores generated. Exiting.")
+        return
 
-log.info("S&P 500 symbols: %s — bulk filter download period=%s", len(sp500), FILTER_PERIOD)
-filter_map = bulk_download_by_ticker(sp500, FILTER_PERIOD)
-ranked_momentum = filter_universe_ranked(filter_map)
-top_ml_tickers = [t for t, _ in ranked_momentum[:TOP_ML_COUNT]]
-log.info(
-    "Filter: pass=%s names; ML universe top %s tickers (cap=%s)",
-    len(ranked_momentum),
-    len(top_ml_tickers),
-    TOP_ML_COUNT,
-)
-log.debug("TOP_ML_TICKERS: %s", top_ml_tickers)
+    # Rule 8: Cross-sectional Normalization
+    pred_values = list(scores.values())
+    mean_pred = np.mean(pred_values)
+    std_pred = np.std(pred_values) or 1.0
+    z_scores = {t: (s - mean_pred) / std_pred for t, s in scores.items()}
+    
+    # Rule 7 & 12: Ranking & Debug
+    ranked_candidates = sorted(z_scores.items(), key=lambda x: -x[1])
+    log.info("Top 10 Ranked Stocks (Z-Score):")
+    for t, zs in ranked_candidates[:10]:
+        log.info("  %s: pred_return=%.6f, z_score=%.4f", t, scores[t], zs)
 
-held_for_ml = [t for t in positions if t not in top_ml_tickers]
-if held_for_ml:
-    log.info(
-        "Extra ML for %s portfolio ticker(s) not in top-%s: %s",
-        len(held_for_ml),
-        TOP_ML_COUNT,
-        held_for_ml,
-    )
-
-ml_download_list = list(dict.fromkeys(top_ml_tickers + held_for_ml))
-log.debug("ml_download_list len=%s", len(ml_download_list))
-ohlcv_1y = bulk_download_by_ticker(ml_download_list, "1y")
-
-scores, prices, score_errors = run_parallel_ml_scoring(ohlcv_1y)
-
-for t in held_for_ml:
-    if t in scores:
-        log.debug("held ticker %s already scored; skip fallback", t)
-        continue
-    try:
-        log.info("held fallback ML download ticker=%s", t)
-        ml_df = get_data(t)
-        if ml_df.empty:
-            raise ValueError("empty ml df")
-        pred_return = train_and_score(ml_df)
-        if not pd.notna(pred_return):
-            raise ValueError("invalid predicted return")
-        raw_h = yf.download([t], period="5d", group_by="ticker", progress=False, threads=True)
-        if not raw_h.empty and isinstance(raw_h.columns, pd.MultiIndex) and t in raw_h.columns.get_level_values(0):
-            px = float(raw_h[t]["Close"].dropna().iloc[-1])
-        else:
-            px = float(ml_df["Close"].iloc[-1])
-        scores[t] = pred_return
-        prices[t] = px
-        log.info("held fallback OK %s predicted_return=%.6f price=%.6f", t, pred_return, px)
-    except Exception as e:
-        log.warning("held fallback failed %s: %s", t, e)
-        score_errors.append((t, e))
-
-fill_prices_bulk(list(positions.keys()), prices)
-log.debug("scores keys=%s prices keys=%s", list(scores.keys()), list(prices.keys()))
-
-if score_errors and not scores:
-    names = ", ".join(str(t) for t, _ in score_errors[:3])
-    log.error("fatal: no scores, errors sample=%s", score_errors[:5])
-    raise RuntimeError(
-        f"No tickers scored (all failed). First errors for: {names}. — {score_errors[0]!r}"
-    )
-if score_errors:
-    for t, err in score_errors[:20]:
-        log.warning("scoring skip ticker=%s err=%r", t, err)
-    if len(score_errors) > 20:
-        log.warning("… plus %s more scoring warnings", len(score_errors) - 20)
-
-ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-log.info("ranked (ml) count=%s", len(ranked))
-log.debug("ranked full: %s", ranked)
-
-ranked_with_return = [
-    (ticker, float(pred_return))
-    for ticker, pred_return in ranked
-    if pd.notna(pred_return)
-]
-top_picks = [(t, r) for t, r in ranked_with_return if r > MIN_PREDICTED_RETURN][:TOP_BUY_PICKS]
-print("Top 10 ranked stocks (predicted return):", [(t, float(r)) for t, r in ranked_with_return[:10]])
-print("Selected top_picks:", top_picks)
-
-today = datetime.now().strftime("%Y-%m-%d")
-log.info("trade date today=%s", today)
-
-# ===== SELL =====
-log.info("---------- SELL phase ----------")
-for ticker, pos in list(positions.items()):
-    price = prices.get(ticker)
-    if price is None:
-        log.warning("SELL skip %s: no price in quotes", ticker)
-        continue
-
-    hold_days = days_since(pos["buy_date"])
-    log.debug(
-        "position %s shares=%s buy_price=%s price=%s hold_days=%s stop_level=%.6f",
-        ticker,
-        pos["shares"],
-        pos["buy_price"],
-        price,
-        hold_days,
-        float(pos["buy_price"]) * STOP_LOSS,
-    )
-
-    # STOP LOSS
-    if price < pos["buy_price"] * STOP_LOSS:
-        cash += pos["shares"] * price
-        log.info(
-            "STOP_LOSS %s proceeds=%.6f (shares=%s @ %.6f)",
-            ticker,
-            pos["shares"] * price,
-            pos["shares"],
-            price,
-        )
-        log_trade("STOP_LOSS", ticker, price, pos["shares"])
-        remove_position(ticker)
-        continue
-
-    # MODEL SELL (no day trading)
-    sc = scores.get(ticker)
-    if ticker in scores and sc < 0.4 and hold_days >= MIN_HOLD_DAYS:
-        cash += pos["shares"] * price
-        log.info(
-            "SELL %s model score=%.6f hold_days=%s proceeds=%.6f",
-            ticker,
-            sc,
-            hold_days,
-            pos["shares"] * price,
-        )
-        log_trade("SELL", ticker, price, pos["shares"])
-        remove_position(ticker)
-        continue
-    log.debug("SELL no action %s (score=%s hold_days=%s)", ticker, sc, hold_days)
-
-# ===== BUY =====
-available_slots = MAX_POSITIONS - len(get_portfolio())
-skipped_insufficient_cash = []
-planned_allocations = []
-log.info(
-    "---------- BUY phase max_positions=%s open_after_sells=%s available_slots=%s cash=%.6f "
-    "return_top_n=%s min_predicted_return=%.6f top_picks=%s ----------",
-    MAX_POSITIONS,
-    len(get_portfolio()),
-    available_slots,
-    cash,
-    TOP_BUY_PICKS,
-    MIN_PREDICTED_RETURN,
-    top_picks,
-)
-
-total_return = sum(pred_return for _, pred_return in top_picks)
-if total_return <= 0:
-    log.warning("BUY skip: total_return <= 0 (top_picks=%s)", top_picks)
-    if discord_no_trade is not None:
-        try:
-            discord_no_trade()
-        except Exception as e:
-            log.debug("discord_no_trade failed: %s", e)
-else:
-    starting_cash_for_alloc = cash
-    for ticker, pred_return in top_picks:
-        if available_slots <= 0:
-            log.debug("BUY break: no slots")
-            break
-
-        if ticker in positions:
-            log.debug("BUY skip %s already in initial positions dict", ticker)
-            continue
-
-        price = prices.get(ticker)
-        if price is None:
-            log.info("BUY skip %s missing latest price", ticker)
-            continue
-        weight = pred_return / total_return
-        allocation = starting_cash_for_alloc * weight
-        shares = int(allocation // price)
-        print(
-            "Allocator:",
-            ticker,
-            "pred_return=",
-            round(pred_return, 6),
-            "weight=",
-            round(weight, 6),
-            "allocation=",
-            round(allocation, 2),
-            "shares=",
-            shares,
-        )
-
-        if shares <= 0:
-            detail = (
-                f"allocation ${allocation:.2f} < ${price:.2f}/share "
-                f"(cash_now ${cash:.2f}, weight {weight:.4f})"
-            )
-            skipped_insufficient_cash.append((ticker, detail))
-            log.info("BUY skip %s zero shares: %s", ticker, detail)
-            continue
-
-        cost = shares * price
-        if cost > cash:
-            # Extra guard against any float edge cases in allocation math.
-            detail = (
-                f"cost ${cost:.2f} > cash ${cash:.2f} "
-                f"(alloc ${allocation:.2f}, shares={shares}, price=${price:.2f})"
-            )
-            skipped_insufficient_cash.append((ticker, detail))
-            log.info("BUY skip %s insufficient cash: %s", ticker, detail)
-            continue
-
-        cash -= cost
-        planned_allocations.append((ticker, allocation, cost))
-        log.info(
-            "BUY %s pred_return=%.6f weight=%.6f allocation=%.2f shares=%s price=%.6f cost=%.6f cash_after=%.6f",
-            ticker,
-            pred_return,
-            weight,
-            allocation,
-            shares,
-            price,
-            cost,
-            cash,
-        )
-        add_position(ticker, shares, price)
-        log_trade("BUY", ticker, price, shares)
-
-        available_slots -= 1
-
-if planned_allocations:
-    total_planned = sum(a for _, a, _ in planned_allocations)
-    total_invested = sum(c for _, _, c in planned_allocations)
-else:
-    total_planned = 0.0
-    total_invested = 0.0
-print("Total allocated capital (planned):", round(total_planned, 2))
-print("Total allocated capital (invested):", round(total_invested, 2))
-
-# ===== UPDATE CASH =====
-log.info("---------- UPDATE CASH final_cash=%.6f ----------", cash)
-update_cash(cash)
-
-# ===== PERFORMANCE =====
-positions_current = {p["ticker"]: p for p in get_portfolio()}
-fill_prices_bulk(list(positions_current.keys()), prices)
-
-total_value = cash
-unrealized_pl = 0.0
-position_actions: dict[str, str] = {}
-for ticker, pos in positions_current.items():
-    price = prices.get(ticker)
-    if price is None:
-        continue
-    shares = int(pos.get("shares") or 0)
-    buy_price = float(pos.get("buy_price") or 0.0)
-    total_value += shares * price
-    unrealized_pl += (price - buy_price) * shares
-
-    # Action recommendation mirrors SELL logic (and STOP_LOSS threshold).
-    action = "HOLD"
-    try:
-        if buy_price and price < buy_price * STOP_LOSS:
-            action = "STOP_LOSS"
-        else:
-            sc = scores.get(ticker)
+    # ===== SELL PHASE (Rule 10: Only in CLOSE mode) =====
+    log.info("---------- SELL PHASE (MODE=%s) ----------", MODE)
+    if MODE == "CLOSE":
+        for ticker, pos in list(positions.items()):
+            price = prices.get(ticker)
+            if price is None: continue
+            
             hold_days = days_since(pos["buy_date"])
-            if sc is not None and sc < 0.4 and hold_days >= MIN_HOLD_DAYS:
-                action = "SELL"
-    except Exception:
-        action = "HOLD"
-    position_actions[ticker] = action
+            buy_price = float(pos["buy_price"])
+            shares = float(pos["shares"])
+            
+            # Rule 11: Strict No Day-Trading
+            if datetime.now().strftime("%Y-%m-%d") == pos["buy_date"]:
+                log.info("SELL skip %s: bought today (Day-trading protection)", ticker)
+                continue
+            
+            sell_reason = None
+            if price < buy_price * STOP_LOSS: sell_reason = "STOP_LOSS"
+            elif price > buy_price * TAKE_PROFIT: sell_reason = "TAKE_PROFIT" # Rule 5
+            elif ticker in scores and scores[ticker] < 0.4 and hold_days >= MIN_HOLD_DAYS:
+                sell_reason = "MODEL_SELL"
+            
+            if sell_reason:
+                # Rule 9: Transaction Costs
+                execution_price = price * COST_SELL
+                proceeds = shares * execution_price
+                cash += proceeds
+                log_trade(sell_reason, ticker, execution_price, shares)
+                remove_position(ticker)
+                log.info("Sold %s: %s @ %.2f (proceeds %.2f)", ticker, sell_reason, execution_price, proceeds)
+            else:
+                log.info("Hold %s: price=%.2f, hold_days=%d", ticker, price, hold_days)
+    else:
+        log.info("Skipping SELL phase (Rules: Only allow SELL when MODE == CLOSE)")
 
-invested_amount = max(0.0, float(total_value - cash))
+    # ===== BUY PHASE (Rule 10: Only in OPEN mode) =====
+    log.info("---------- BUY PHASE (MODE=%s) ----------", MODE)
+    current_portfolio_size = len(get_portfolio())
+    available_slots = MAX_POSITIONS - current_portfolio_size
+    
+    # Rule 3: Market Regime Filter
+    if not market_regime_bullish:
+        log.info("BUY disabled: Market Regime is BEARISH (MA50 < MA200)")
+        available_slots = 0
 
-prev_total_value = None
-first_total_value = None
-try:
-    prev_rows = (
-        supabase.table("performance")
-        .select("date,total_value")
-        .order("date", desc=True)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    if prev_rows:
-        prev_total_value = float(prev_rows[0].get("total_value") or 0.0)
-except Exception:
-    prev_total_value = None
+    if MODE == "OPEN" and available_slots > 0:
+        # Filter top picks (Rule 7: pred > 0, Rule 6: No cooldown, not already owned)
+        eligible = []
+        for t, zs in ranked_candidates:
+            if scores[t] > MIN_PREDICTED_RETURN and t not in positions and t not in cooldown_tickers:
+                # Rule 4: Risk-adjusted score
+                vol = vol_map.get(t, 0.02) # fallback
+                risk_score = scores[t] / (vol if vol > 0 else 0.02)
+                eligible.append((t, risk_score))
+            if len(eligible) >= 10: break # Look at top 10 for sizing
+            
+        top_picks = eligible[:TOP_BUY_PICKS]
+        log.info("Selected Top Picks for Buy: %s", top_picks)
+        
+        if not top_picks:
+            log.info("No eligible top picks found.")
+            if discord_no_trade: discord_no_trade()
+        else:
+            # Rule 4: Normalizing weights
+            total_risk_score = sum(rs for _, rs in top_picks[:available_slots])
+            
+            for ticker, rs in top_picks[:available_slots]:
+                price = prices.get(ticker)
+                if price is None: continue
+                
+                weight = rs / total_risk_score if total_risk_score > 0 else (1.0 / available_slots)
+                allocation = cash * weight
+                
+                if allocation < 5.0:
+                    log.info("Skipped %s: allocation too small ($%.2f)", ticker, allocation)
+                    continue
 
-try:
-    first_rows = (
-        supabase.table("performance")
-        .select("date,total_value")
-        .order("date", desc=False)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    if first_rows:
-        first_total_value = float(first_rows[0].get("total_value") or 0.0)
-except Exception:
-    first_total_value = None
+                # Rule 9: Transaction Costs
+                execution_price = price * COST_BUY
+                shares = float(allocation / execution_price)
+                
+                cost = shares * execution_price
+                if cost <= cash + 1e-6:
+                    cash -= cost
+                    cash = max(0.0, cash)
+                    add_position(ticker, shares, execution_price)
+                    log_trade("BUY", ticker, execution_price, shares)
+                    log.info("Bought %s: %.4f shares @ %.2f (cost %.2f)", ticker, shares, execution_price, cost)
+                    log.info("DEBUG BUY | Ticker: %s | Pred Return: %.4f | Alloc: $%.2f | Shares: %.4f", ticker, scores[ticker], allocation, shares)
+                else:
+                    log.info("Skipped %s: insufficient cash for %.4f shares", ticker, shares)
+    elif MODE != "OPEN":
+        log.info("Skipping BUY phase (Rules: Only allow BUY when MODE == OPEN)")
+    else:
+        log.info("Skipping BUY phase: Available slots=%d", available_slots)
 
-log.info(
-    "performance snapshot cash=%.6f legacy_positions_notional=%.6f total_value=%.6f",
-    cash,
-    total_value - cash,
-    total_value,
-)
-
-t_perf = _t0()
-perf_res = supabase.table("performance").insert({
-    "date": today,
-    "total_value": float(total_value),
-}).execute()
-log.debug("performance insert %.2f ms", _dt(t_perf))
-if not (perf_res.data or []):
-    log.error("performance insert empty")
-    raise RuntimeError(
-        "performance insert returned no rows — check RLS INSERT on `performance` and unique constraints (e.g. duplicate `date`)."
-    )
-perf_row = perf_res.data[0]
-perf_id = perf_row.get("id", "?")
-
-log.info("Total Value: $%.2f", total_value)
-log.info("Supabase performance row id=%s perf_row_keys=%s", perf_id, list(perf_row.keys()))
-
-profit_loss_day = (total_value - prev_total_value) if prev_total_value is not None else None
-profit_loss_since_start = (total_value - first_total_value) if first_total_value is not None else None
-if discord_portfolio_summary is not None:
+    # Wrap up
+    log.info("Final Cash: %.2f", cash)
+    update_cash(cash)
+    
+    # Performance Snapshot
+    final_portfolio = get_portfolio()
+    total_val = cash
+    unrealized_pl = 0.0
+    for p in final_portfolio:
+        px = prices.get(p["ticker"], float(p["buy_price"]))
+        shares = float(p["shares"])
+        total_val += shares * px
+        unrealized_pl += (px - float(p["buy_price"])) * shares
+    
     try:
-        discord_portfolio_summary(
-            run_date=today,
-            cash=float(cash),
-            invested=float(invested_amount),
-            total_value=float(total_value),
-            pl_unrealized=float(unrealized_pl),
-            top_picks=top_picks,
-            positions=positions_current,
-            prices=prices,
-            position_actions=position_actions,
-        )
+        supabase.table("performance").insert({"date": datetime.now().strftime("%Y-%m-%d"), "total_value": float(total_val)}).execute()
+        
+        if discord_portfolio_summary:
+            discord_portfolio_summary(
+                run_date=datetime.now().strftime("%Y-%m-%d"),
+                cash=cash,
+                invested=total_val - cash,
+                total_value=total_val,
+                pl_unrealized=unrealized_pl,
+                top_picks=[(t, scores[t]) for t, _ in (top_picks if 'top_picks' in locals() else [])],
+                positions={p["ticker"]: p for p in final_portfolio},
+                prices=prices
+            )
     except Exception as e:
-        log.debug("discord_portfolio_summary failed: %s", e)
+        log.error("Final reporting error: %s", e)
 
-if ranked:
-    top_t, top_p = ranked[0]
-    log.info(
-        "Highest ML predicted return: %s = %.6f (positive-return filter, up to %s picks)",
-        top_t,
-        float(top_p),
-        TOP_BUY_PICKS,
-    )
+    log.info("========== BOT RUN END wall_ms=%.2f ==========", _dt(RUN_T0))
 
-if skipped_insufficient_cash:
-    log.warning("Buys skipped — insufficient cash (showing up to 10):")
-    for t, detail in skipped_insufficient_cash[:10]:
-        log.warning("  %s: %s", t, detail)
-
-log.info(
-    "========== BOT RUN END wall_ms=%.2f ==========",
-    _dt(RUN_T0),
-)
+if __name__ == "__main__":
+    RUN_T0 = _t0()
+    try:
+        main()
+    except Exception as e:
+        log.exception("Fatal error in main")
+        if discord_error: discord_error(str(e))

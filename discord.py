@@ -18,12 +18,16 @@ def send_discord(message):
 
 # ===== TRADE ALERT =====
 def discord_trade_alert(action, ticker, price, shares):
+    shares = float(shares)
+    price = float(price)
+    allocation = shares * price
     msg = (
         "**TRADE ALERT**\n"
         f"- Action: {action}\n"
         f"- Ticker: {ticker}\n"
+        f"- Investment: ${allocation:.2f}\n"
         f"- Price: ${price:.2f}\n"
-        f"- Shares: {shares}\n"
+        f"- Shares: {shares:.4f}\n"
         f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
     send_discord(msg)
@@ -67,19 +71,19 @@ def discord_portfolio_summary(
         rows = []
         for ticker, pos in positions.items():
             price = float(prices.get(ticker) or 0.0)
-            shares = int(pos.get("shares") or 0)
+            shares = float(pos.get("shares") or 0.0)
             buy_price = float(pos.get("buy_price") or 0.0)
             invested_amt = shares * buy_price
             value = shares * price
             pnl_amt = value - invested_amt
-            pnl_pct = (pnl_amt / invested_amt) * 100 if invested_amt else 0.0
+            pnl_pct = (pnl_amt / invested_amt) * 100 if invested_amt > 0 else 0.0
             action = position_actions.get(ticker, "HOLD")
-            rows.append((invested_amt, ticker, value, pnl_amt, pnl_pct, action))
+            rows.append((invested_amt, ticker, value, pnl_amt, pnl_pct, action, shares))
 
         rows.sort(key=lambda x: x[0], reverse=True)  # by invested amount
-        for invested_amt, ticker, value, pnl_amt, pnl_pct, action in rows:
+        for invested_amt, ticker, value, pnl_amt, pnl_pct, action, shares in rows:
             msg += (
-                f"- {ticker}: invested=${invested_amt:.2f} | value=${value:.2f} | "
+                f"- {ticker}: {shares:.4f} shares (${value:.2f}) | invested=${invested_amt:.2f} | "
                 f"P/L=${pnl_amt:.2f} ({pnl_pct:.2f}%) | action={action}\n"
             )
 
