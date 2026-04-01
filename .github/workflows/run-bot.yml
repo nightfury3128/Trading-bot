@@ -3,12 +3,11 @@ name: Run trading bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
     # Market open (9:30 AM ET ≈ 13:30 UTC)
-    - cron: "30 13 * * 1-5"
+    - cron: "30 12 * * 1-5"
 
     # 1 hour before close (3:00 PM ET ≈ 19:00 UTC)
-    - cron: "0 19 * * 1-5"
+    - cron: "0 18 * * 1-5"
 
 jobs:
   run:
