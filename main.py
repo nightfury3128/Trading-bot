@@ -773,10 +773,34 @@ log.info("---------- UPDATE CASH final_cash=%.6f ----------", cash)
 update_cash(cash)
 
 # ===== PERFORMANCE =====
+positions_current = {p["ticker"]: p for p in get_portfolio()}
+fill_prices_bulk(list(positions_current.keys()), prices)
+
 total_value = cash
-for ticker, pos in positions.items():
-    if ticker in prices:
-        total_value += pos["shares"] * prices[ticker]
+unrealized_pl = 0.0
+position_actions: dict[str, str] = {}
+for ticker, pos in positions_current.items():
+    price = prices.get(ticker)
+    if price is None:
+        continue
+    shares = int(pos.get("shares") or 0)
+    buy_price = float(pos.get("buy_price") or 0.0)
+    total_value += shares * price
+    unrealized_pl += (price - buy_price) * shares
+
+    # Action recommendation mirrors SELL logic (and STOP_LOSS threshold).
+    action = "HOLD"
+    try:
+        if buy_price and price < buy_price * STOP_LOSS:
+            action = "STOP_LOSS"
+        else:
+            sc = scores.get(ticker)
+            hold_days = days_since(pos["buy_date"])
+            if sc is not None and sc < 0.4 and hold_days >= MIN_HOLD_DAYS:
+                action = "SELL"
+    except Exception:
+        action = "HOLD"
+    position_actions[ticker] = action
 
 invested_amount = max(0.0, float(total_value - cash))
 
@@ -845,11 +869,11 @@ if discord_portfolio_summary is not None:
             cash=float(cash),
             invested=float(invested_amount),
             total_value=float(total_value),
-            profit_loss_since_start=profit_loss_since_start,
-            profit_loss_day=profit_loss_day,
+            pl_unrealized=float(unrealized_pl),
             top_picks=top_picks,
-            positions=positions,
+            positions=positions_current,
             prices=prices,
+            position_actions=position_actions,
         )
     except Exception as e:
         log.debug("discord_portfolio_summary failed: %s", e)

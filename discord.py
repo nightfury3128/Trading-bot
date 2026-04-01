@@ -35,27 +35,25 @@ def discord_portfolio_summary(
     cash,
     invested,
     total_value,
-    profit_loss_since_start=None,
-    profit_loss_day=None,
+    pl_unrealized=None,
     top_picks=None,
     positions=None,
     prices=None,
+    position_actions=None,
 ):
     positions = positions or {}
     prices = prices or {}
     top_picks = top_picks or []
+    position_actions = position_actions or {}
+    msg ="@everyone"
+    msg += f"**PORTFOLIO UPDATE** ({run_date})\n\n"
+    msg += f"**Amount Invested**: ${invested:.2f}\n"
+    msg += f"**Capital Left**: ${cash:.2f}\n"
+    if pl_unrealized is not None:
+        msg += f"**P/L Unrealized**: ${pl_unrealized:.2f}\n"
+    msg += f"**Total Value**: ${total_value:.2f}\n"
 
-    msg = f"**PORTFOLIO UPDATE** ({run_date})\n\n"
-    msg += f"- Cash left: ${cash:.2f}\n"
-    msg += f"- Total invested (open positions): ${invested:.2f}\n"
-    msg += f"- Total value: ${total_value:.2f}\n"
-
-    if profit_loss_since_start is not None:
-        msg += f"- P/L since start: ${profit_loss_since_start:.2f}\n"
-    if profit_loss_day is not None:
-        msg += f"- P/L vs previous snapshot: ${profit_loss_day:.2f}\n"
-
-    msg += "\n**Top Picks (predicted return)**\n"
+    msg += "\n**Top picks**\n"
     if top_picks:
         for ticker, score in top_picks:
             msg += f"- {ticker}: {score:.4f}\n"
@@ -66,13 +64,24 @@ def discord_portfolio_summary(
     if not positions:
         msg += "- None\n"
     else:
+        rows = []
         for ticker, pos in positions.items():
             price = float(prices.get(ticker) or 0.0)
             shares = int(pos.get("shares") or 0)
             buy_price = float(pos.get("buy_price") or 0.0)
+            invested_amt = shares * buy_price
             value = shares * price
-            pnl_pct = ((price - buy_price) / buy_price) * 100 if buy_price else 0.0
-            msg += f"- {ticker}: {shares} sh | ${value:.2f} | {pnl_pct:.2f}%\n"
+            pnl_amt = value - invested_amt
+            pnl_pct = (pnl_amt / invested_amt) * 100 if invested_amt else 0.0
+            action = position_actions.get(ticker, "HOLD")
+            rows.append((invested_amt, ticker, value, pnl_amt, pnl_pct, action))
+
+        rows.sort(key=lambda x: x[0], reverse=True)  # by invested amount
+        for invested_amt, ticker, value, pnl_amt, pnl_pct, action in rows:
+            msg += (
+                f"- {ticker}: invested=${invested_amt:.2f} | value=${value:.2f} | "
+                f"P/L=${pnl_amt:.2f} ({pnl_pct:.2f}%) | action={action}\n"
+            )
 
     send_discord(msg)
 
