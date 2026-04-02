@@ -59,17 +59,86 @@ export async function GET() {
       })).filter((q: any) => q.value != null)
     }
 
-    // Fetch Benchmark (SPY) for comparison
-    const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
-    const benchmarkResults = await yahooFinance.chart('SPY', {
-      period1: thirtyDaysAgo,
-      interval: '1d'
+    // Fetch US Benchmark (^GSPC - S&P 500)
+    const yearAgo = new Date()
+    yearAgo.setFullYear(yearAgo.getFullYear() - 1)
+    
+    const [spResults, niftyResults] = await Promise.all([
+      yahooFinance.chart('^GSPC', { period1: yearAgo, interval: '1d' }),
+      yahooFinance.chart('^NSEI', { period1: yearAgo, interval: '1d' })
+    ])
+
+    const usBenchmarkHistory = (spResults.quotes || [])
+      .map((q: any) => ({ date: q.date.toISOString().split('T')[0], value: q.close }))
+      .filter((q: any) => q.value != null)
+      
+    const inBenchmarkHistory = (niftyResults.quotes || [])
+      .map((q: any) => ({ date: q.date.toISOString().split('T')[0], value: q.close }))
+      .filter((q: any) => q.value != null)
+
+    // Enrich allTrades with Buy/Sell matching logic for UI
+    const enrichedTrades: any[] = []
+    const lastBuys: Record<string, any> = {}
+    
+    // Process trades in CHRONOLOGICAL order to match buys with sells
+    const chronTrades = [...allTrades].reverse()
+    
+    chronTrades.forEach((t: any) => {
+      const ticker = t.ticker
+      const action = String(t.action).toUpperCase()
+      const isExit = ['SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'MODEL_SELL'].includes(action)
+      
+      if (action === 'BUY') {
+        lastBuys[ticker] = t
+        enrichedTrades.push(t)
+      } else if (isExit) {
+        const tradeData = { ...t }
+        
+        // Priority: 1. Stored data in DB (new trades), 2. Matched chronological data (old trades)
+        let buy = lastBuys[ticker]
+        let entryDateStr = tradeData.entry_date || (buy ? buy.date : null)
+        let buyPriceValue = tradeData.entry_price || (buy ? buy.price : null)
+
+        if (entryDateStr) {
+          tradeData.buy_price = buyPriceValue
+          tradeData.buy_date = entryDateStr
+          
+          const entryDate = String(entryDateStr).split(' ')[0]
+          const exitDate = t.date.split(' ')[0]
+          
+          // Calculate holding days
+          const d1 = new Date(entryDate)
+          const d2 = new Date(exitDate)
+          tradeData.holding_days = Math.max(0, Math.floor((d2.getTime() - d1.getTime()) / (1000 * 3600 * 24)))
+          
+          // Benchmark Performance
+          const history = ticker.endsWith('.NS') ? inBenchmarkHistory : usBenchmarkHistory
+          
+          // Find the nearest benchmark price on or BEFORE the trade dates
+          const startBench = [...history].reverse().find((h: any) => h.date <= entryDate)
+          const endBench = [...history].reverse().find((h: any) => h.date <= exitDate)
+          
+          if (startBench && endBench) {
+            const marketReturn = (endBench.value - startBench.value) / startBench.value
+            tradeData.market_return = marketReturn * 100
+            
+            // Recalculate alpha based on the matched holding period
+            tradeData.alpha = (t.pnl_pct || 0) - tradeData.market_return
+          }
+          
+          // Include remaining_shares for the frontend (from DB or current run)
+          tradeData.remaining_shares = tradeData.remaining_shares || 0
+          
+          if (!tradeData.entry_date) delete lastBuys[ticker]
+        }
+        enrichedTrades.push(tradeData)
+      } else {
+        enrichedTrades.push(t)
+      }
     })
-    const benchmarkData = benchmarkResults.quotes.map((q: any) => ({
-      date: q.date,
-      value: q.close
-    })).filter((q: any) => q.value != null)
+
+    // Back to descending for the API return
+    const processedTrades = enrichedTrades.reverse()
 
     if (tickers.length > 0) {
       const quotes: any = await yahooFinance.quote(tickers)
@@ -80,7 +149,6 @@ export async function GET() {
         }
       })
       
-      // Async sector resolution 
       const profiles = await Promise.all(
         tickers.map((t: string) => yahooFinance.quoteSummary(t, { modules: ['assetProfile'] })
           .then((res: any) => ({ ticker: t, sector: res?.assetProfile?.sector || 'Unknown' }))
@@ -92,20 +160,31 @@ export async function GET() {
         sectors[p.ticker] = p.sector
       })
     }
+
+    return NextResponse.json({
+      portfolio,
+      trades: processedTrades.slice(0, 20),
+      allTrades: processedTrades,
+      performance,
+      account,
+      livePrices,
+      sectors,
+      fxRate,
+      fxHistory,
+      usBenchmarkHistory,
+      inBenchmarkHistory
+    })
   } catch (e) {
     console.error('Yahoo Finance Error:', e)
+    return NextResponse.json({
+      portfolio,
+      trades,
+      allTrades,
+      performance,
+      account,
+      livePrices,
+      sectors,
+      fxRate
+    })
   }
-
-  return NextResponse.json({
-    portfolio,
-    trades,
-    allTrades,
-    performance,
-    account,
-    livePrices,
-    sectors,
-    fxRate,
-    fxHistory,
-    benchmarkData
-  })
 }

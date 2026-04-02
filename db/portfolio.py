@@ -36,6 +36,35 @@ def add_position(
     supabase.table("portfolio").insert(data).execute()
 
 
+def update_position(ticker: str, new_shares: float, current_price: float):
+    # Fetch current to preserve some data if needed, but mainly we update shares and calculated values
+    res = supabase.table("portfolio").select("*").eq("ticker", ticker).single().execute()
+    if not res.data:
+        return
+    
+    pos = res.data
+    buy_price = float(pos["buy_price"])
+    from utils.currency import get_currency, get_conversion_rates
+    currency = pos.get("currency", get_currency(ticker))
+    inr_to_usd, _ = get_conversion_rates()
+    
+    new_local_val = new_shares * buy_price # Book value update? Or current value? 
+    # Usually portfolio table stores "invested" value. But let's check add_position.
+    # add_position uses shares * price (execution price).
+    
+    new_usd_val = new_local_val
+    if currency == "INR":
+        new_usd_val = new_local_val * inr_to_usd
+    
+    data = {
+        "shares": float(new_shares),
+        "local_value": float(new_local_val),
+        "usd_value": float(new_usd_val)
+    }
+    
+    supabase.table("portfolio").update(data).eq("ticker", ticker).execute()
+
+
 def remove_position(ticker: str):
     # Constraint removed - we can now delete from portfolio while keeping trade history!
     supabase.table("portfolio").delete().eq("ticker", ticker).execute()

@@ -11,18 +11,19 @@ import IndustryPieChart from '@/components/IndustryPieChart'
 import FXTracker from '@/components/FXTracker'
 import MarketWeightChart from '@/components/MarketWeightChart'
 import TopPredictionsChart from '@/components/TopPredictionsChart'
-import { LogOut, RefreshCw } from 'lucide-react'
+import TradeAnalysis from '@/components/TradeAnalysis'
+import { LogOut, RefreshCw, Award, Globe, ShieldCheck, Zap, Activity } from 'lucide-react'
 
 export default function Dashboard() {
   const supabase = createClient()
   const router = useRouter()
-  
+
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [data, setData] = useState<any>(null)
   const [displayCurrency, setDisplayCurrency] = useState<'USD' | 'INR'>('INR')
   const [marketFilter, setMarketFilter] = useState<'ALL' | 'US' | 'INDIA'>('ALL')
-  
+
   const fetchData = async () => {
     setRefreshing(true)
     try {
@@ -43,7 +44,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData()
-    const interval = setInterval(fetchData, 5000)
+    const interval = setInterval(fetchData, 10000)
     return () => clearInterval(interval)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -54,52 +55,51 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-[#0a0a0a] text-white">
-        <div className="w-16 h-16 border-4 border-gray-800 border-t-blue-500 rounded-full animate-spin mb-4" />
-        <p className="text-gray-400 font-medium">Loading Portfolio Data...</p>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#050505] text-white">
+        <div className="relative">
+          <div className="w-24 h-24 border-b-2 border-blue-500 rounded-full animate-spin" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="w-16 h-16 border-t-2 border-emerald-500 rounded-full animate-spin-slow" />
+          </div>
+        </div>
+        <p className="text-gray-500 font-black uppercase tracking-[0.3em] text-[10px] mt-8 animate-pulse">Initializing Alpha Core</p>
       </div>
     )
   }
 
   if (!data) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-[#0a0a0a] text-white">
-        <p className="text-rose-500 font-medium bg-rose-500/10 px-4 py-2 rounded-xl">Error: Unable to load data from API.</p>
+      <div className="flex flex-col items-center justify-center min-h-screen bg-[#050505] text-white">
+        <p className="text-rose-500 font-black tracking-tighter bg-rose-500/10 px-6 py-3 rounded-2xl border border-rose-500/20 shadow-2xl shadow-rose-500/10 uppercase text-xs">Error: Core Communication Failure</p>
       </div>
     )
   }
 
   const { portfolio: fullPortfolio, trades: fullTrades, performance, account, livePrices, sectors, fxRate } = data
-  
-  // Filtering
+
   const filteredPortfolio = fullPortfolio.filter((p: any) => {
     if (marketFilter === 'US') return !p.ticker.endsWith('.NS')
     if (marketFilter === 'INDIA') return p.ticker.endsWith('.NS')
     return true
   })
-  
+
   const filteredTrades = fullTrades.filter((t: any) => {
     if (marketFilter === 'US') return !t.ticker.endsWith('.NS')
     if (marketFilter === 'INDIA') return t.ticker.endsWith('.NS')
     return true
   })
 
-  // Value Calculations
-  let investedValueBase = 0 // in native currency logic, but usually stored in db
-  let currentPortfolioValueBase = 0
-  
-  // For global stats, we convert everything to display currency
+  // Value Calculations converted to display currency
   let totalInvestedValue = 0
   let totalCurrentValue = 0
-  
+
   filteredPortfolio.forEach((p: any) => {
     const currentPrice = livePrices[p.ticker] || p.buy_price
     const tickerCurrency = p.ticker.endsWith('.NS') ? 'INR' : 'USD'
-    
-    // Convert to display currency
+
     let valInvested = Number(p.shares) * p.buy_price
     let valCurrent = Number(p.shares) * currentPrice
-    
+
     if (displayCurrency === 'INR' && tickerCurrency === 'USD') {
       valInvested *= fxRate
       valCurrent *= fxRate
@@ -107,53 +107,41 @@ export default function Dashboard() {
       valInvested /= fxRate
       valCurrent /= fxRate
     }
-    
+
     totalInvestedValue += valInvested
     totalCurrentValue += valCurrent
   })
-  
-  // Cash balance logic
+
   let displayCash = 0
   if (marketFilter === 'US') {
-     displayCash = displayCurrency === 'INR' ? account.cash_usd * fxRate : account.cash_usd
+    displayCash = displayCurrency === 'INR' ? account.cash_usd * fxRate : account.cash_usd
   } else if (marketFilter === 'INDIA') {
-     displayCash = displayCurrency === 'USD' ? account.cash_inr / fxRate : account.cash_inr
+    displayCash = displayCurrency === 'USD' ? account.cash_inr / fxRate : account.cash_inr
   } else {
-     // ALL
-     const total_usd = account.cash_usd + (account.cash_inr / fxRate)
-     displayCash = displayCurrency === 'INR' ? total_usd * fxRate : total_usd
+    const total_usd = account.cash_usd + (account.cash_inr / fxRate)
+    displayCash = displayCurrency === 'INR' ? total_usd * fxRate : total_usd
   }
 
   const totalValue = displayCash + totalCurrentValue
   const unrealizedPnL = totalCurrentValue - totalInvestedValue
 
-  // Realized Profit Calculation
   let totalRealizedPnL = 0
   const allTradesClean = data.allTrades || []
-  
+
   allTradesClean.forEach((t: any) => {
-    // Filter by market
     const isIndian = t.ticker.endsWith('.NS')
     if (marketFilter === 'US' && isIndian) return
     if (marketFilter === 'INDIA' && !isIndian) return
-    
-    // Only count sells/exits for realized profit
-    // (Strategies can emit MODEL_SELL as well.)
+
     const action = String(t.action || '').toUpperCase()
-    const isExit = ['SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'MODEL_SELL'].includes(action)
+    const isExit = ['SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'MODEL_SELL', 'NEGATIVE_SIGNAL', 'PROFIT_LOCK', 'RISK_REDUCTION'].includes(action)
     if (!isExit) return
-    
+
     let pnl = Number(t.realized_pnl)
     if (!Number.isFinite(pnl)) pnl = 0
     const tickerCurrency = isIndian ? 'INR' : 'USD'
-    
-    // Convert to display currency
-    if (displayCurrency === 'INR' && tickerCurrency === 'USD') {
-      pnl *= fxRate
-    } else if (displayCurrency === 'USD' && tickerCurrency === 'INR') {
-      pnl /= fxRate
-    }
-    
+    if (displayCurrency === 'INR' && tickerCurrency === 'USD') pnl *= fxRate
+    else if (displayCurrency === 'USD' && tickerCurrency === 'INR') pnl /= fxRate
     totalRealizedPnL += pnl
   })
 
@@ -166,132 +154,190 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-gray-100 p-4 md:p-8 font-sans selection:bg-blue-500/30">
-      <header className="max-w-7xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between mb-8 pb-6 border-b border-gray-800/60">
-        <div className="mb-4 md:mb-0">
-          <div className="flex items-center gap-3 mb-1">
-            <div className="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center shadow-lg shadow-blue-500/20">
-              <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-              </svg>
-            </div>
-            <h1 className="text-3xl font-bold text-white tracking-tight">Global Dashboard</h1>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-6 w-full md:w-auto">
-          <FXTracker fxRate={fxRate} fxHistory={data.fxHistory || []} />
-          
-          <div className="flex items-center gap-3">
-            <div className="flex bg-[#171717] p-1 rounded-xl border border-gray-800">
-            {['ALL', 'US', 'INDIA'].map((m) => (
-              <button
-                key={m}
-                onClick={() => setMarketFilter(m as any)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${marketFilter === m ? 'bg-blue-500 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
-              >
-                {m}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex bg-[#171717] p-1 rounded-xl border border-gray-800">
-            {['INR', 'USD'].map((c) => (
-              <button
-                key={c}
-                onClick={() => setDisplayCurrency(c as any)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${displayCurrency === c ? 'bg-emerald-500 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button 
-                onClick={fetchData} 
-                disabled={refreshing}
-                className="py-2 px-4 bg-[#171717] border border-gray-800 rounded-xl hover:bg-[#202020] transition-colors flex items-center justify-center disabled:opacity-50 group shadow-sm text-sm font-medium"
-            >
-                <RefreshCw className={`w-4 h-4 text-gray-400 group-hover:text-white ${refreshing ? 'animate-spin' : ''}`} />
-            </button>
-            <button 
-                onClick={handleLogout} 
-                className="flex items-center justify-center gap-2 bg-rose-500/10 text-rose-500 border border-rose-500/20 hover:bg-rose-500/20 px-4 py-2 rounded-xl transition-all font-medium text-sm"
-            >
-                <LogOut className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
+    <div className="min-h-screen bg-[#020202] text-gray-100 font-sans selection:bg-blue-500/30 overflow-x-hidden">
+      {/* Background Cinematic Glows */}
+      <div className="fixed top-0 left-0 w-full h-full pointer-events-none z-0">
+        <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-blue-500/5 blur-[150px] rounded-full" />
       </div>
+
+      <header className="border-b border-white/5 bg-[#080808]/50 backdrop-blur-md sticky top-0 z-[100]">
+        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shadow-2xl shadow-white/10 group overflow-hidden relative">
+              <div className="absolute inset-0 bg-blue-500 scale-0 group-hover:scale-100 transition-transform duration-500 rounded-xl" />
+              <Activity className="w-5 h-5 text-black relative z-10 group-hover:text-white transition-colors" />
+            </div>
+            <div>
+              <h1 className="text-sm font-black text-white tracking-[0.2em] uppercase leading-none">Antigravity</h1>
+              <span className="text-[9px] font-black text-gray-500 uppercase tracking-widest mt-1 inline-block">AI QUANT LABS • LIVE</span>
+            </div>
+          </div>
+
+          <div className="hidden lg:flex items-center gap-8">
+            <FXTracker fxRate={fxRate} fxHistory={data.fxHistory || []} />
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="flex bg-black p-1 rounded-xl border border-white/5">
+              {['INR', 'USD'].map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setDisplayCurrency(c as any)}
+                  className={`px-4 py-1.5 rounded-lg text-[10px] font-black tracking-widest transition-all duration-300 ${displayCurrency === c ? 'bg-white text-black' : 'text-gray-500 hover:text-white'}`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={fetchData}
+              className="w-10 h-10 bg-black border border-white/5 rounded-xl flex items-center justify-center hover:bg-white/5 transition-all group"
+            >
+              <RefreshCw className={`w-4 h-4 text-gray-400 group-hover:text-white ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={handleLogout}
+              className="w-10 h-10 bg-rose-500/10 border border-rose-500/20 rounded-xl flex items-center justify-center hover:bg-rose-500/20 transition-all text-rose-500"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       </header>
 
-      <main className="max-w-7xl mx-auto space-y-8">
-        <PortfolioSummary 
-          totalValue={totalValue} 
-          cash={displayCash} 
-          positionsCount={filteredPortfolio.length} 
-          dailyChange={dailyChange} 
-          investedAmount={totalInvestedValue}
-          unrealizedPnL={unrealizedPnL}
-          realizedPnL={totalRealizedPnL}
-          currency={displayCurrency}
-        />
+      <main className="max-w-7xl mx-auto px-6 py-10 relative z-10 space-y-12">
+        {/* Portfolio Summary - Now at top, full width */}
+        <section className="space-y-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-1.5 h-6 bg-blue-500 rounded-full" />
+              <h2 className="text-sm font-black text-white tracking-widest uppercase">Operational Summary</h2>
+            </div>
+            <div className="flex bg-white/5 p-1 rounded-xl border border-white/5">
+              {['ALL', 'US', 'INDIA'].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMarketFilter(m as any)}
+                  className={`px-4 py-1.5 rounded-lg text-[9px] font-black tracking-[0.2em] transition-all duration-300 ${marketFilter === m ? 'bg-white text-black shadow-lg shadow-white/10' : 'text-gray-500 hover:text-white'}`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          <div className="lg:col-span-2 space-y-8">
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 md:p-8 shadow-sm">
-              <PerformanceGraph data={performance} currency={displayCurrency} fxRate={fxRate} />
+          <PortfolioSummary
+            totalValue={totalValue}
+            cash={displayCash}
+            positionsCount={filteredPortfolio.length}
+            dailyChange={dailyChange}
+            investedAmount={totalInvestedValue}
+            unrealizedPnL={unrealizedPnL}
+            realizedPnL={totalRealizedPnL}
+            currency={displayCurrency}
+          />
+        </section>
+
+        {/* Global Analytics Section */}
+        <section className="space-y-10">
+          <div className="flex items-center gap-4">
+            <div className="w-1.5 h-12 bg-blue-500 rounded-full" />
+            <div>
+              <h3 className="text-3xl font-black text-white tracking-tighter">Market Performance</h3>
+              <p className="text-gray-500 font-bold uppercase text-[10px] tracking-widest">Portfolio Analytics vs Benchmarks</p>
+            </div>
+          </div>
+          <div className="bg-[#0c0c0c] border border-white/5 rounded-[3rem] p-10 shadow-2xl relative overflow-hidden group">
+            <div className="absolute inset-0 bg-gradient-to-br from-blue-500/[0.03] to-transparent pointer-events-none" />
+            <PerformanceGraph
+              data={performance}
+              currency={displayCurrency}
+              fxRate={fxRate}
+              usBenchmarkData={data.usBenchmarkHistory || []}
+              inBenchmarkData={data.inBenchmarkHistory || []}
+            />
+          </div>
+        </section>
+
+        {/* Main Intelligence Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-10">
+          <div className="lg:col-span-2 space-y-10">
+            <div className="bg-[#0c0c0c] border border-white/5 rounded-[3rem] p-10 shadow-2xl overflow-hidden relative">
+              <div className="flex items-center justify-between mb-8">
+                <div className="flex items-center gap-4">
+                  <ShieldCheck className="w-6 h-6 text-emerald-500" />
+                  <div>
+                    <h2 className="text-2xl font-black text-white tracking-tighter">Active Portfolio</h2>
+                    <span className="text-[10px] font-black text-gray-500 uppercase tracking-widest">{filteredPortfolio.length} ASSETS DEPLOYED</span>
+                  </div>
+                </div>
+              </div>
+              <PortfolioTable
+                portfolio={filteredPortfolio}
+                livePrices={livePrices}
+                totalInvestedValue={totalInvestedValue}
+                currency={displayCurrency}
+                fxRate={fxRate}
+              />
             </div>
 
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 md:p-8 shadow-sm">
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">Active Positions</h2>
-                <span className="text-sm text-gray-400">{filteredPortfolio.length} Assets</span>
+            {/* Trade Intelligence (Analytics) */}
+            <div className="space-y-10 pt-10">
+              <div className="flex items-center gap-4">
+                <div className="w-1.5 h-12 bg-emerald-500 rounded-full" />
+                <div>
+                  <h3 className="text-3xl font-black text-white tracking-tighter leading-none">Trade Intelligence</h3>
+                  <p className="text-gray-500 font-bold uppercase text-[10px] tracking-widest mt-1">Advanced Outcome Breakdown</p>
+                </div>
               </div>
-              <PortfolioTable 
-                portfolio={filteredPortfolio} 
-                livePrices={livePrices} 
-                totalInvestedValue={totalInvestedValue} 
+              <TradeAnalysis
+                trades={data.allTrades || []}
                 currency={displayCurrency}
                 fxRate={fxRate}
               />
             </div>
           </div>
-          
-          <div className="space-y-8">
-            {/* NEW: Portfolio Weighting Chart */}
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm">
-              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Capital Allocation</h2>
-              <MarketWeightChart 
-                 portfolio={fullPortfolio} 
-                 cash_usd={account.cash_usd} 
-                 cash_inr={account.cash_inr} 
-                 fxRate={fxRate} 
+
+          <div className="space-y-10">
+            {/* Capital Allocation */}
+            <div className="bg-[#0c0c0c]/80 backdrop-blur-3xl border border-white/5 rounded-[2.5rem] p-8 shadow-2xl">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="text-sm font-black text-white tracking-widest uppercase">Allocation</h2>
+              </div>
+              <MarketWeightChart
+                portfolio={fullPortfolio}
+                cash_usd={account.cash_usd}
+                cash_inr={account.cash_inr}
+                fxRate={fxRate}
               />
             </div>
 
-            {/* Asset Allocation Pie Chart */}
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm">
-              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Industry Breakdown</h2>
-              <IndustryPieChart 
-                portfolio={filteredPortfolio} 
-                livePrices={livePrices} 
-                sectors={sectors || {}} 
+            {/* Industry Breakdown */}
+            <div className="bg-[#0c0c0c]/80 backdrop-blur-3xl border border-white/5 rounded-[2.5rem] p-8 shadow-2xl">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="text-sm font-black text-white tracking-widest uppercase">Industry Exposure</h2>
+              </div>
+              <IndustryPieChart
+                portfolio={filteredPortfolio}
+                livePrices={livePrices}
+                sectors={sectors || {}}
                 currency={displayCurrency}
                 fxRate={fxRate}
               />
             </div>
 
-            {/* NEW: ML Top Prediction Signals */}
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm">
-              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Trade Signals</h2>
+            {/* Prediction Signals */}
+            <div className="bg-[#0c0c0c]/80 backdrop-blur-3xl border border-white/5 rounded-[2.5rem] p-8 shadow-2xl">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="text-sm font-black text-white tracking-widest uppercase">ML Core Signals</h2>
+              </div>
               <TopPredictionsChart scores={data.ml_scores || {}} />
             </div>
 
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm flex flex-col max-h-[400px]">
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">Recent Activity</h2>
+            {/* Recent Activity Feed */}
+            <div className="bg-[#0c0c0c]/80 backdrop-blur-3xl border border-white/5 rounded-[2.5rem] p-8 shadow-2xl flex flex-col max-h-[600px]">
+              <div className="flex items-center justify-between mb-8">
+                <h2 className="text-sm font-black text-white tracking-widest uppercase">Chronicle</h2>
               </div>
               <div className="overflow-y-auto flex-1 pr-2 custom-scrollbar">
                 <TradeCards trades={filteredTrades} currency={displayCurrency} fxRate={fxRate} />
@@ -300,6 +346,36 @@ export default function Dashboard() {
           </div>
         </div>
       </main>
+
+      <style jsx global>{`
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;700;900&family=JetBrains+Mono:wght@500;800&display=swap');
+        
+        body {
+          font-family: 'Outfit', sans-serif;
+        }
+        
+        .font-mono {
+          font-family: 'JetBrains+Mono', monospace;
+        }
+        
+        .animate-spin-slow {
+          animation: spin 3s linear infinite;
+        }
+
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: rgba(255, 255, 255, 0.1);
+        }
+      `}</style>
     </div>
   )
 }

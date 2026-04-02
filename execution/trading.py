@@ -25,7 +25,7 @@ def get_strategy(ticker):
         return us_strategy
 
 
-def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> float:
+def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float, vol_map: dict = None) -> float:
     """Evaluates and executes SELL rules routing to US/India strategies."""
     log.info("---------- SELL PHASE ----------")
     
@@ -38,8 +38,9 @@ def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> 
 
         strategy = get_strategy(ticker)
         score = scores.get(ticker)
+        vol = vol_map.get(ticker, 0.02) if vol_map else 0.02
         
-        sell_reason, proceeds = strategy.handle_sell(ticker, pos, price, score)
+        sell_reason, proceeds = strategy.handle_sell(ticker, pos, price, score, volatility=vol)
         
         if sell_reason:
             # Normalize proceeds to USD for the cash balance if needed
@@ -62,137 +63,103 @@ def run_buy_phase(
     other_cash: float = 0.0,
     vol_map: dict[str, float] | None = None
 ) -> float:
-    """Evaluates and executes BUY rules with multi-currency handling."""
-    log.info("---------- BUY PHASE (%s) ----------", base_currency)
+    """Evaluates and executes BUY rules using the UNIFIED ALLOCATOR."""
+    log.info("---------- SMART BUY PHASE (%s) ----------", base_currency)
     
-    from config import INDUSTRY_CAP_US, INDUSTRY_CAP_IN
-    from strategy.risk import get_industry
+    from strategy.allocator import allocate_portfolio
+    from utils.notifications import send_discord
     inr_to_usd, usd_to_inr = get_conversion_rates()
-    market_cap = INDUSTRY_CAP_IN if base_currency == "INR" else INDUSTRY_CAP_US
-    
-    # Rule 7: "Low Activity" Filter
-    if top_picks:
-        best_ticker, _ = top_picks[0]
-        best_pred = scores.get(best_ticker, 0.0)
-        if best_pred < MIN_PREDICTED_RETURN_BUY:
-            log.info("Skipping trades due to low signal: best prediction (%.2f%%) < required (%.2f%%)", 
-                     best_pred * 100, MIN_PREDICTED_RETURN_BUY * 100)
-            return cash
-
-    # SEPARATE MARKET RISK: Filter portfolio to ONLY include current market tickers
-    market_portfolio = [p for p in portfolio if (base_currency == "INR" and p["ticker"].endswith(".NS")) or (base_currency == "USD" and not p["ticker"].endswith(".NS"))]
-    positions_map = {p["ticker"]: p for p in market_portfolio}
-    
-    # Local market value and exposure calculation
-    total_market_value_local = 0.0
-    industry_exposure_local = {}
-    for t, pos in positions_map.items():
-        px = prices.get(t, float(pos.get("buy_price", 0)))
-        val = float(pos.get("shares", 0)) * px
-        total_market_value_local += val
-        ind = get_industry(t)
-        industry_exposure_local[ind] = industry_exposure_local.get(ind, 0.0) + val
-    
-    # Current pool AUM (Cash + Market Positions)
-    total_market_value_local += cash
-
-    log.info("Total %s Market Capital: %.2f", base_currency, total_market_value_local)
     
     if not top_picks:
-        log.info("No picks provided for Buy phase.")
+        log.info("No candidates for Buy phase.")
         return cash
 
-    remaining_risk_score = sum(rs for _, rs in top_picks)
+    # 1. PRE-FILTER: Filter candidates to ONLY include current market + not in portfolio
+    market_portfolio_tickers = [p["ticker"] for p in portfolio if (base_currency == "INR" and p["ticker"].endswith(".NS")) or (base_currency == "USD" and not p["ticker"].endswith(".NS"))]
+    
+    # Filter candidates: must match market and not be already owned
+    candidates = []
+    for t, s in top_picks:
+        is_in_market = (base_currency == "INR" and t.endswith(".NS")) or (base_currency == "USD" and not t.endswith(".NS"))
+        if is_in_market and t not in market_portfolio_tickers:
+            candidates.append(t)
+            
+    if not candidates:
+        log.info("All candidates already in portfolio or wrong market.")
+        return cash
 
-    for ticker, rs in top_picks:
-        # Buffer check in local currency (roughly equivalent to $5.1 USD)
-        buffer = 5.1 if base_currency == "USD" else 5.1 * usd_to_inr
-        if cash <= buffer:
-            log.info("Skipped %s: out of cash (%.2f remaining)", ticker, cash)
-            break
+    # 2. RUN UNIFIED ALLOCATOR
+    # Passing Price * COST_BUY to ensure accurate share counts after commissions
+    prices_with_cost = {t: prices[t] * COST_BUY for t in candidates if t in prices}
+    
+    alloc_result = allocate_portfolio(
+        tickers=candidates,
+        predictions=scores,
+        volatilities=vol_map or {},
+        prices=prices_with_cost,
+        total_capital=cash,
+        market=base_currency
+    )
+    
+    if not alloc_result:
+        log.info("Allocator returned no allocations.")
+        return cash
+
+    # 3. EXECUTE TRADES
+    for ticker, info in alloc_result.items():
+        shares = float(info.get("shares", 0))
+        cost_local = float(info.get("allocation", 0))
+        
+        if shares <= 0:
+            log.info("Skipped %s: zero or unfilled allocation", ticker)
+            continue
 
         price = prices.get(ticker)
-        if price is None:
-            remaining_risk_score -= rs
-            continue
-
-        # Sizing relative to THIS pool only
-        weight = rs / remaining_risk_score if remaining_risk_score > 0 else 1.0
-        allocation_local = min(
-            cash * weight, 
-            total_market_value_local * (market_cap * 0.95)
-        )
-        allocation_usd = normalize_to_usd(allocation_local, base_currency, inr_to_usd)
-            
-        if allocation_local < (5.1 if base_currency == "USD" else 5.1 * usd_to_inr):
-            log.info("Skipped %s: allocation too small (%.2f %s)", ticker, allocation_local, base_currency)
-            remaining_risk_score -= rs
-            continue
-
-        # Industry Cap Check (using local market values and local cap)
-        ind = get_industry(ticker)
-        curr_ind_exp = industry_exposure_local.get(ind, 0.0)
-        if (curr_ind_exp + allocation_local) / total_market_value_local > market_cap:
-            log.info("Skipped %s: %s industry cap exceeded (%.2f%% > %.0f%%)", 
-                     ticker, ind, ((curr_ind_exp + allocation_local) / total_market_value_local) * 100, market_cap * 100)
-            remaining_risk_score -= rs
-            continue
+        if price is None: continue
 
         currency = get_currency(ticker)
-        
-        # NOTE: Since pools are separate, we expect ticker currency to match base_currency 
-        # or we might need explicit conversion if they differ. 
-        # For now, if ticker is INR and base is INR, execution_price is in INR.
-        
-        # Execute Buy
         execution_price_local = price * COST_BUY
-        shares = float(allocation_local / execution_price_local)
-        
-        # Rule: Indian market does not allow fractional shares
-        if ticker.endswith(".NS"):
-            shares = float(int(shares))
-            if shares == 0:
-                log.info("Skipped %s: allocation not enough for 1 full share", ticker)
-                remaining_risk_score -= rs
-                continue
-                
-        cost_local = shares * execution_price_local
+        # Final safety check vs cash
+        if cost_local > cash + 0.01:
+            log.warning("Allocation exceeds cash for %s. Capping.", ticker)
+            cost_local = cash
+            shares = cost_local / execution_price_local
+            if ticker.endswith(".NS"): shares = float(int(shares))
+            if shares <= 0: continue
+            cost_local = shares * execution_price_local
+
         cost_usd = normalize_to_usd(cost_local, currency, inr_to_usd)
 
-        if cost_local <= cash + 1e-6:
-            cash -= cost_local
-            cash = max(0.0, cash)
-            remaining_risk_score -= rs
+        cash -= cost_local
+        cash = max(0.0, cash)
 
-            risk_level = None
-            stop_loss = None
-            # India-only: compute and persist volatility-based stop-loss.
-            if ticker.endswith(".NS"):
-                volatility = float(vol_map.get(ticker, 0.02)) if vol_map else 0.02
-                risk_level, stop_loss = india_strategy.get_india_risk_and_stop_loss(volatility)
-                log.info(f"Ticker {ticker} risk={risk_level} stop_loss={stop_loss:.2f}")
+        # Strategy Overrides (e.g. India stop-loss)
+        risk_level, stop_loss = None, None
+        if ticker.endswith(".NS"):
+            volatility = float(vol_map.get(ticker, 0.02)) if vol_map else 0.02
+            risk_level, stop_loss = india_strategy.get_india_risk_and_stop_loss(volatility)
 
-            add_position(
-                ticker, 
-                shares, 
-                execution_price_local, 
-                currency=currency, 
-                local_val=cost_local, 
-                usd_val=cost_usd,
-                risk_level=risk_level,
-                stop_loss=stop_loss,
-            )
-            log_trade("BUY", ticker, execution_price_local, shares)
-
-            # Update industry tracking for next picks (Local)
-            ind = get_industry(ticker)
-            industry_exposure_local[ind] = industry_exposure_local.get(ind, 0.0) + cost_local
-
-            log.info("Bought %s: %.4f shares @ %.2f (%s)", 
-                     ticker, shares, execution_price_local, currency)
-        else:
-            log.info("Skipped %s: insufficient local cash", ticker)
-            remaining_risk_score -= rs
+        add_position(
+            ticker, 
+            shares, 
+            execution_price_local, 
+            currency=currency, 
+            local_val=cost_local, 
+            usd_val=cost_usd,
+            risk_level=risk_level,
+            stop_loss=stop_loss,
+        )
+        log_trade("BUY", ticker, execution_price_local, shares)
+        
+        # Log and Alert
+        weight_pct = info.get("weight", 0) * 100
+        log.info("SMART ALLOCATION: %s | Weight: %.1f%% | Capital: %.2f %s | Shares: %.4f", 
+                    ticker, weight_pct, cost_local, currency, shares)
+        
+        try:
+            msg = f"🛒 **SMART BUY**: {ticker}\n• Weight: {weight_pct:.1f}%\n• Allocated: {cost_local:.2f} {currency}\n• Units: {shares:.4f}"
+            send_discord(msg)
+        except: pass
 
     return cash
 

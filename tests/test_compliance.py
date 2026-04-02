@@ -70,11 +70,11 @@ def test_business_days_weekend_handling():
         # Should be BLOCKED because only 1 business day passed (Friday to Monday)
         mock_remove.assert_not_called()
 
-def test_low_activity_signal_filter():
-    """Test that BUY phase is skipped if best signal < 1% (Rule 7)."""
-    top_picks = [("META", 0.05)] # Strong risk score, but...
-    scores = {"META": 0.005} # Absolute prediction is 0.5% (too low)
-    prices = {"META": 500.0}
+def test_non_positive_signal_filter():
+    """Test that BUY phase is skipped if prediction is <= 0."""
+    top_picks = [("META", 0.05), ("AAPL", 0.05)]
+    scores = {"META": 0.0, "AAPL": -0.01} # 0 and negative predictions
+    prices = {"META": 500.0, "AAPL": 150.0}
     cash = 1000.0
     
     with patch('execution.trading.add_position') as mock_add:
