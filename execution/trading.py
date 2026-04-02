@@ -17,7 +17,7 @@ from strategy.risk import calculate_industry_exposures, check_industry_cap
 
 
 def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> float:
-    """Evaluates and executes SELL rules. Returns updated cash."""
+    """Evaluates and executes SELL rules with strict holding period constraints."""
     log.info("---------- SELL PHASE ----------")
 
     for ticker, pos in list(positions.items()):
@@ -29,9 +29,14 @@ def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> 
         buy_price = float(pos["buy_price"])
         shares = float(pos["shares"])
 
-        # Rule 11: Strict No Day-Trading
+        # Rule 11: Strict No Day-Trading (Explicit same-day block)
         if datetime.now().strftime("%Y-%m-%d") == pos["buy_date"]:
-            log.info("SELL skip %s: bought today (Day-trading protection)", ticker)
+            log.info("Sell blocked on %s: same-day check (No intraday trading allowed)", ticker)
+            continue
+
+        # New Strict Rule: MIN_HOLD_DAYS check MUST pass before any exit logic
+        if hold_days < MIN_HOLD_DAYS:
+            log.info("Sell blocked on %s due to MIN_HOLD_DAYS. Days held: %d/%d", ticker, hold_days, MIN_HOLD_DAYS)
             continue
 
         sell_reason = None
@@ -39,7 +44,8 @@ def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> 
             sell_reason = "STOP_LOSS"
         elif price > buy_price * TAKE_PROFIT:
             sell_reason = "TAKE_PROFIT"
-        elif ticker in scores and scores[ticker] < 0.4 and hold_days >= MIN_HOLD_DAYS:
+        elif ticker in scores and scores[ticker] < 0.4:
+            # We already passed the hold_days check above
             sell_reason = "MODEL_SELL"
 
         if sell_reason:
@@ -49,7 +55,7 @@ def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> 
             log_trade(sell_reason, ticker, execution_price, shares)
             remove_position(ticker)
             log.info(
-                "Sold %s: %s @ %.2f (proceeds %.2f)",
+                "Execution: Sold %s: %s @ %.2f (proceeds %.2f)",
                 ticker,
                 sell_reason,
                 execution_price,
@@ -66,8 +72,18 @@ def run_buy_phase(
     cash: float,
     portfolio: list,
 ) -> float:
-    """Evaluates and executes BUY rules. Returns updated cash."""
+    """Evaluates and executes BUY rules with investment-style low frequency checks."""
     log.info("---------- BUY PHASE ----------")
+    
+    from config import MIN_PREDICTED_RETURN_BUY
+    
+    # Rule 7: "Low Activity" Filter - If best predicted return < 1% skip all buys
+    if top_picks:
+        best_ticker, _ = top_picks[0]
+        best_pred = scores.get(best_ticker, 0.0)
+        if best_pred < MIN_PREDICTED_RETURN_BUY:
+            log.info("Skipping trades due to low signal: best prediction (%.2f%%) < required (%.2f%%)", best_pred * 100, MIN_PREDICTED_RETURN_BUY * 100)
+            return cash
 
     positions = {p["ticker"]: p for p in portfolio}
     cooldown_tickers = get_recent_sells()

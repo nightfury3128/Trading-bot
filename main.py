@@ -9,6 +9,7 @@ from utils.notifications import (
     discord_no_trade,
     discord_portfolio_summary,
 )
+from utils.time_utils import _t0, _dt, days_since
 
 from config import TOP_ML_COUNT, TOP_BUY_PICKS, MIN_PREDICTED_RETURN
 from db.account import get_account, update_cash
@@ -94,7 +95,14 @@ def main():
         # BUY PHASE (OPEN mode)
         top_picks = []
         if MODE == "OPEN":
-            if not market_regime_bullish:
+            # Constraint 4: skip BUY if portfolio already has recent buys (within last 3 days)
+            recent_buys = [p for p in portfolio if days_since(p["buy_date"]) < 3]
+            if recent_buys:
+                log.info(
+                    "Skipping BUY phase (Rule 4): Recent buy activity detected: %s",
+                    [b["ticker"] for b in recent_buys],
+                )
+            elif not market_regime_bullish:
                 log.info("BUY disabled: Market Regime is BEARISH (MA50 < MA200)")
             else:
                 eligible = []

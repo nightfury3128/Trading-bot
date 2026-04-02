@@ -43,7 +43,12 @@ def bulk_download_by_ticker(tickers: list[str], period: str) -> dict[str, pd.Dat
         chunk = tickers[i : i + BULK_CHUNK]
         try:
             raw = yf.download(
-                chunk, period=period, group_by="ticker", progress=False, threads=True
+                chunk,
+                period=period,
+                interval="1d",
+                group_by="ticker",
+                progress=False,
+                threads=True,
             )
             result.update(split_bulk_ohlcv(raw, chunk))
         except Exception as e:
