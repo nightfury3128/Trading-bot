@@ -1,13 +1,11 @@
 from datetime import datetime
 from config import (
-    STOP_LOSS,
     TAKE_PROFIT,
     MIN_HOLD_DAYS,
     COST_SELL,
     COST_BUY,
     TOP_BUY_PICKS,
     MIN_PREDICTED_RETURN,
-    INDUSTRY_CAP,
     MIN_PREDICTED_RETURN_BUY,
 )
 from utils.logger import log
@@ -60,12 +58,17 @@ def run_buy_phase(
     scores: dict,
     cash: float,
     portfolio: list,
-    base_currency: str = "USD"
+    base_currency: str = "USD",
+    other_cash: float = 0.0,
+    vol_map: dict[str, float] | None = None
 ) -> float:
     """Evaluates and executes BUY rules with multi-currency handling."""
     log.info("---------- BUY PHASE (%s) ----------", base_currency)
     
+    from config import INDUSTRY_CAP_US, INDUSTRY_CAP_IN
+    from strategy.risk import get_industry
     inr_to_usd, usd_to_inr = get_conversion_rates()
+    market_cap = INDUSTRY_CAP_IN if base_currency == "INR" else INDUSTRY_CAP_US
     
     # Rule 7: "Low Activity" Filter
     if top_picks:
@@ -76,18 +79,24 @@ def run_buy_phase(
                      best_pred * 100, MIN_PREDICTED_RETURN_BUY * 100)
             return cash
 
-    positions_map = {p["ticker"]: p for p in portfolio}
+    # SEPARATE MARKET RISK: Filter portfolio to ONLY include current market tickers
+    market_portfolio = [p for p in portfolio if (base_currency == "INR" and p["ticker"].endswith(".NS")) or (base_currency == "USD" and not p["ticker"].endswith(".NS"))]
+    positions_map = {p["ticker"]: p for p in market_portfolio}
     
-    # Industry tracking remains in USD for global risk management
-    total_portfolio_value_usd, industry_exposure_usd = calculate_industry_exposures(
-        positions_map, prices, inr_to_usd
-    )
+    # Local market value and exposure calculation
+    total_market_value_local = 0.0
+    industry_exposure_local = {}
+    for t, pos in positions_map.items():
+        px = prices.get(t, float(pos.get("buy_price", 0)))
+        val = float(pos.get("shares", 0)) * px
+        total_market_value_local += val
+        ind = get_industry(t)
+        industry_exposure_local[ind] = industry_exposure_local.get(ind, 0.0) + val
     
-    # Current cash value in USD for global sizing
-    cash_usd_equiv = normalize_to_usd(cash, base_currency, inr_to_usd)
-    total_portfolio_value_usd += cash_usd_equiv
+    # Current pool AUM (Cash + Market Positions)
+    total_market_value_local += cash
 
-    log.info("Total Global Portfolio Value (USD): $%.2f", total_portfolio_value_usd)
+    log.info("Total %s Market Capital: %.2f", base_currency, total_market_value_local)
     
     if not top_picks:
         log.info("No picks provided for Buy phase.")
@@ -107,19 +116,25 @@ def run_buy_phase(
             remaining_risk_score -= rs
             continue
 
+        # Sizing relative to THIS pool only
         weight = rs / remaining_risk_score if remaining_risk_score > 0 else 1.0
-        allocation_local = cash * weight
+        allocation_local = min(
+            cash * weight, 
+            total_market_value_local * (market_cap * 0.95)
+        )
         allocation_usd = normalize_to_usd(allocation_local, base_currency, inr_to_usd)
-
-        if allocation_usd < 5.0:
-            log.info("Skipped %s: allocation too small ($%.2f)", ticker, allocation_usd)
+            
+        if allocation_local < (5.1 if base_currency == "USD" else 5.1 * usd_to_inr):
+            log.info("Skipped %s: allocation too small (%.2f %s)", ticker, allocation_local, base_currency)
             remaining_risk_score -= rs
             continue
 
-        # Industry Cap Check (using USD values for global limit)
-        if not check_industry_cap(
-            ticker, allocation_usd, total_portfolio_value_usd, industry_exposure_usd, INDUSTRY_CAP
-        ):
+        # Industry Cap Check (using local market values and local cap)
+        ind = get_industry(ticker)
+        curr_ind_exp = industry_exposure_local.get(ind, 0.0)
+        if (curr_ind_exp + allocation_local) / total_market_value_local > market_cap:
+            log.info("Skipped %s: %s industry cap exceeded (%.2f%% > %.0f%%)", 
+                     ticker, ind, ((curr_ind_exp + allocation_local) / total_market_value_local) * 100, market_cap * 100)
             remaining_risk_score -= rs
             continue
 
@@ -149,20 +164,29 @@ def run_buy_phase(
             cash = max(0.0, cash)
             remaining_risk_score -= rs
 
+            risk_level = None
+            stop_loss = None
+            # India-only: compute and persist volatility-based stop-loss.
+            if ticker.endswith(".NS"):
+                volatility = float(vol_map.get(ticker, 0.02)) if vol_map else 0.02
+                risk_level, stop_loss = india_strategy.get_india_risk_and_stop_loss(volatility)
+                log.info(f"Ticker {ticker} risk={risk_level} stop_loss={stop_loss:.2f}")
+
             add_position(
                 ticker, 
                 shares, 
                 execution_price_local, 
                 currency=currency, 
                 local_val=cost_local, 
-                usd_val=cost_usd
+                usd_val=cost_usd,
+                risk_level=risk_level,
+                stop_loss=stop_loss,
             )
             log_trade("BUY", ticker, execution_price_local, shares)
 
-            # Update industry tracking for next picks (USD)
-            from strategy.risk import get_industry
+            # Update industry tracking for next picks (Local)
             ind = get_industry(ticker)
-            industry_exposure_usd[ind] = industry_exposure_usd.get(ind, 0.0) + cost_usd
+            industry_exposure_local[ind] = industry_exposure_local.get(ind, 0.0) + cost_local
 
             log.info("Bought %s: %.4f shares @ %.2f (%s)", 
                      ticker, shares, execution_price_local, currency)

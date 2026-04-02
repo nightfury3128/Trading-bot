@@ -13,11 +13,12 @@ def test_allocation_cash_utilization():
     # Portfolio is empty
     portfolio = []
     
-    # Mock the DB calls
+    # Mock the DB calls. Also relax the industry cap so allocation isn't constrained.
     with patch('execution.trading.add_position') as mock_add, \
          patch('execution.trading.log_trade') as mock_log, \
          patch('execution.trading.calculate_industry_exposures', return_value=(0.0, {})), \
-         patch('execution.trading.check_industry_cap', return_value=True):
+         patch('execution.trading.check_industry_cap', return_value=True), \
+         patch('config.INDUSTRY_CAP_US', 1.0):
         
         remaining_cash = run_buy_phase(top_picks, prices, scores, initial_cash, portfolio)
         

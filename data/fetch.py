@@ -35,16 +35,24 @@ def split_bulk_ohlcv(raw: pd.DataFrame, tickers: list) -> dict[str, pd.DataFrame
     out = {}
     if raw is None or raw.empty:
         return out
+    
+    # Check if we have a MultiIndex or a single Ticker result
     if not isinstance(raw.columns, pd.MultiIndex):
+        # Single ticker case
         if len(tickers) == 1:
-            out[tickers[0]] = raw.dropna(how="all")
+            out[tickers[0]] = raw.copy().dropna(how="all")
         return out
-    level0 = raw.columns.get_level_values(0)
-    for t in tickers:
-        if t in level0:
-            sub = raw[t].dropna(how="all")
-            if not sub.empty:
-                out[t] = sub
+        
+    try:
+        # Multi-ticker case
+        for t in tickers:
+            if t in raw.columns.levels[0]:
+                sub = raw[t].dropna(how="all")
+                if not sub.empty:
+                    out[t] = sub
+    except (KeyError, AttributeError, TypeError) as e:
+        log.debug("Split failed for some tickers: %s", e)
+        
     return out
 
 

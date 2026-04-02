@@ -14,7 +14,8 @@ SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK")
 
 # ===== TRADING PARAMETERS =====
-STOP_LOSS = 0.95
+STOP_LOSS_US = 0.95 # 5% drop for US
+STOP_LOSS_IN = 0.75 # 25% drop for India
 TAKE_PROFIT = 1.10
 MIN_HOLD_DAYS = 7
 MIN_REBUY_DAYS = 5
@@ -22,7 +23,8 @@ TOP_BUY_PICKS = 5
 FUTURE_RETURN_DAYS = 5
 MIN_PREDICTED_RETURN = 0.0
 MIN_PREDICTED_RETURN_BUY = 0.01  # 1% minimum for new buys
-INDUSTRY_CAP = 0.10  # 10%
+INDUSTRY_CAP_US = 0.10  # 10% for US market
+INDUSTRY_CAP_IN = 0.25  # 25% for Indian market
 
 # Transaction Costs
 COST_BUY = 1.001
