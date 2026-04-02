@@ -1,5 +1,13 @@
 'use client'
 
+const RISK_COLORS: Record<string, string> = {
+  LOW: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+  MEDIUM: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
+  HIGH: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
+}
+
+const DEFAULT_RISK_LEVEL = 'MEDIUM'
+
 export default function PortfolioTable({ 
   portfolio, 
   livePrices, 
@@ -38,6 +46,7 @@ export default function PortfolioTable({
             <th className="py-4 px-5 font-semibold text-gray-400 text-sm tracking-wide">Current Price</th>
             <th className="py-4 px-5 font-semibold text-gray-400 text-sm tracking-wide">Value</th>
             <th className="py-4 px-5 font-semibold text-gray-400 text-sm tracking-wide w-[20%]">Allocation</th>
+            <th className="py-4 px-5 font-semibold text-gray-400 text-sm tracking-wide">Stop Loss</th>
             <th className="py-4 px-5 font-semibold text-gray-400 text-sm tracking-wide text-right">P/L</th>
           </tr>
         </thead>
@@ -75,6 +84,23 @@ export default function PortfolioTable({
                     <span className="text-xs font-mono text-gray-400 w-10">{allocation.toFixed(1)}%</span>
                   </div>
                 </td>
+                <td className="py-4 px-5 font-mono text-sm">
+                  {pos.ticker.endsWith('.NS') && pos.stop_loss != null ? (() => {
+                    const stopPrice = convert(buyPriceNative * Number(pos.stop_loss), pos.ticker)
+                    const riskLevel: string = pos.risk_level || DEFAULT_RISK_LEVEL
+                    const colorClass = RISK_COLORS[riskLevel] || RISK_COLORS[DEFAULT_RISK_LEVEL]
+                    return (
+                      <div className="flex flex-col gap-1">
+                        <span className="text-gray-200">{format(stopPrice)}</span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wide border ${colorClass} w-fit`}>
+                          {riskLevel}
+                        </span>
+                      </div>
+                    )
+                  })() : (
+                    <span className="text-gray-600">—</span>
+                  )}
+                </td>
                 <td className="py-4 px-5 text-right font-medium">
                   <div className="flex flex-col items-end gap-1">
                     <span className={`text-sm ${pnlTotal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
@@ -90,7 +116,7 @@ export default function PortfolioTable({
           })}
           {portfolio.length === 0 && (
             <tr>
-              <td colSpan={7} className="py-12 text-center text-gray-500 font-medium">No active positions.</td>
+              <td colSpan={8} className="py-12 text-center text-gray-500 font-medium">No active positions.</td>
             </tr>
           )}
         </tbody>
