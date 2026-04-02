@@ -6,7 +6,8 @@ log = setup_logger("performance_cleaner")
 
 def clear_performance():
     log.info("Deleting all rows from performance table...")
-    supabase.table("performance").delete().filter("id", "gt", 0).execute()
+    # 'id' does not exist in performance table, use 'total_value' > 0 instead
+    supabase.table("performance").delete().filter("total_value", "gt", 0).execute()
     log.info("SUCCESS: Performance table cleared.")
 
 
