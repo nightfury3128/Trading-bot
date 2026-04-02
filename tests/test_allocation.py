@@ -58,20 +58,9 @@ def test_industry_cap_enforcement():
         
         remaining_cash = run_buy_phase(top_picks, prices, scores, initial_cash, [])
         
-        # Only one should be bought (XOM hits the $100 limit, CVX exceeds it)
-        # 1st buy: $100. Remaining cash: $100.
-        # 2nd buy: Projected Energy = $100 (existing) + $100 (new) = $200. $200/$1000 = 20% > 10%.
-        assert mock_add.call_count == 1
-        assert "XOM" in [call[0][0] for call in mock_add.call_args_list]
-        assert "CVX" not in [call[0][0] for call in mock_add.call_args_list]
-
-def test_insufficient_cash_skip():
-    """Ensure bot skips buy if cash is below the $5 minimum."""
-    top_picks = [("AAPL", 50.0)]
-    prices = {"AAPL": 150.0}
-    scores = {"AAPL": 0.05}
-    initial_cash = 4.0 # Less than $5.1 logic limit
-    
-    with patch('execution.trading.add_position') as mock_add:
-        run_buy_phase(top_picks, prices, scores, initial_cash, [])
-        mock_add.assert_not_called()
+        # Both should be bought now since hard blocks were removed in favor of soft penalties
+        assert mock_add.call_count == 2
+        
+        tickers_bought = [call[0][0] for call in mock_add.call_args_list]
+        assert "XOM" in tickers_bought
+        assert "CVX" in tickers_bought

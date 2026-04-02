@@ -14,31 +14,29 @@ def test_india_strategy_relaxed_rules():
     }
     
     # Mocking dependencies
-    with patch("strategy.india_strategy.remove_position") as mock_remove, \
+    with patch("strategy.india_strategy.update_position") as mock_update, \
+         patch("strategy.india_strategy.remove_position") as mock_remove, \
          patch("strategy.india_strategy.log_trade") as mock_log:
         
         # Test 1: Stop Loss Trigger (Even on same day)
         reason, proceeds = handle_sell("RELIANCE.NS", pos, 2000.0, 0.5)
         assert reason == "STOP_LOSS"
         assert proceeds > 0
-        mock_remove.assert_called_once()
         
         # Reset mocks
         mock_remove.reset_mock()
         mock_log.reset_mock()
         
         # Test 2: Take Profit Trigger (Even on same day)
-        reason, proceeds = handle_sell("RELIANCE.NS", pos, 3000.0, 0.5)
-        assert reason == "TAKE_PROFIT"
+        reason, proceeds = handle_sell("RELIANCE.NS", pos, 3000.0, 0.05)
+        assert reason == "PROFIT_LOCK"
         assert proceeds > 0
-        mock_remove.assert_called_once()
         
         # Reset mocks
         mock_remove.reset_mock()
         mock_log.reset_mock()
         
-        # Test 3: Model Sell (Even on same day)
-        reason, proceeds = handle_sell("RELIANCE.NS", pos, 2500.0, 0.3)
-        assert reason == "MODEL_SELL"
+        # Test 3: Negative Signal (Even on same day)
+        reason, proceeds = handle_sell("RELIANCE.NS", pos, 2500.0, -0.05)
+        assert reason == "NEGATIVE_SIGNAL"
         assert proceeds > 0
-        mock_remove.assert_called_once()

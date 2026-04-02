@@ -40,19 +40,21 @@ def handle_sell(ticker, pos, price, score, volatility=0.02):
     pred = float(score if score is not None else 0.0)
     pnl_pct_current = ((price / buy_price) - 1)
 
-    # Strong Positive Signal Exception: Always hold winners with high confidence
-    if pred > 0.2:
-        log.info("Hold %s (India): Strong positive signal (%.2f%%)", ticker, pred * 100)
-        return None, 0.0
-
     sell_reason = None
     
     # Risk-based stop-loss fallback
     stop_loss = float(pos.get("stop_loss", STOP_LOSS_IN))
 
     # 1. HARD STOP LOSS (ALWAYS FIRST)
+    # Stop loss logic overrides EVERYTHING, even positive signals
     if price < buy_price * stop_loss:
         sell_reason = "STOP_LOSS"
+
+    # Strong Positive Signal Exception: Always hold winners with high confidence
+    elif pred > 0.2:
+        log.info("Hold %s (India): Strong positive signal (%.2f%%)", ticker, pred * 100)
+        return None, 0.0
+
     # 2. STRONG NEGATIVE SIGNAL
     elif pred < -0.01:
         sell_reason = "NEGATIVE_SIGNAL"

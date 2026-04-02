@@ -27,9 +27,9 @@ def test_dynamic_sell_fraction_high_risk():
          patch('strategy.us_strategy.remove_position'), \
          patch('strategy.us_strategy.business_days_since', return_value=10):
         
-        # We need a trigger. Use take profit.
-        res, proceeds = us_handle_sell("TSLA", pos, 250.0, 0.5, volatility=0.8)
-        assert res == "TAKE_PROFIT"
+        # We need a trigger. Use take profit. pred must be <= 0.2 to avoid strong hold.
+        res, proceeds = us_handle_sell("TSLA", pos, 250.0, 0.05, volatility=0.8)
+        assert res == "PROFIT_LOCK"
         # Since it's take profit, it should be a partial sell unless fraction hits 1.
         # But we need to check the logs? Or we can just inspect the internal calculation if we modify the function to return it.
         # For now, we'll verify it doesn't crash and returns proceeds.
@@ -50,8 +50,8 @@ def test_dynamic_sell_fraction_negative_signal():
          patch('strategy.us_strategy.remove_position'), \
          patch('strategy.us_strategy.business_days_since', return_value=10):
         
-        res, proceeds = us_handle_sell("AAPL", pos, 140.0, 0.3, volatility=0.1) # model sell trigger
-        assert res == "MODEL_SELL"
+        res, proceeds = us_handle_sell("AAPL", pos, 145.0, -0.05, volatility=0.1) # model sell trigger
+        assert res == "NEGATIVE_SIGNAL"
         assert proceeds > 0
 
 def test_stop_loss_override():
@@ -84,9 +84,8 @@ def test_india_whole_shares():
          patch('strategy.india_strategy.update_position'), \
          patch('strategy.india_strategy.remove_position'):
         
-        # Trigger model sell. Fraction might be 0.25 (base) + ... = 0.25. 10 * 0.25 = 2.5 shares.
-        # Should sell 2.0 shares.
-        res, proceeds = india_handle_sell("RELIANCE.NS", pos, 2600.0, 0.3, volatility=0.0)
-        assert res == "MODEL_SELL"
-        # proceeds should be 2 * 2600 * COST_SELL (approx)
-        assert proceeds >= 2 * 2600 * 0.99 
+        # Should sell 1.0 shares (0.2 * 0.5 because profit lock = 0.1, 10 * 0.1 = 1)
+        res, proceeds = india_handle_sell("RELIANCE.NS", pos, 2600.0, 0.05, volatility=0.0)
+        assert res == "PROFIT_LOCK"
+        # proceeds should be 1 * 2600 * COST_SELL (approx)
+        assert proceeds >= 1 * 2600 * 0.99 

@@ -24,16 +24,19 @@ def handle_sell(ticker, pos, price, score, volatility=0.02):
         log.info("Sell blocked on %s (US) due to MIN_HOLD_DAYS. Days held: %d/%d", ticker, hold_days, MIN_HOLD_DAYS)
         return None, 0.0
 
-    # Strong Positive Signal Exception: Always hold winners with high confidence
-    if pred > 0.2:
-        log.info("Hold %s (US): Strong positive signal (%.2f%%)", ticker, pred * 100)
-        return None, 0.0
-
     sell_reason = None
     
     # 1. HARD STOP LOSS (ALWAYS FIRST)
-    if price < buy_price * STOP_LOSS_US:
+    # Stop loss logic overrides EVERYTHING, even positive signals
+    stop_loss_val = float(pos.get("stop_loss", STOP_LOSS_US))
+    if price < buy_price * stop_loss_val:
         sell_reason = "STOP_LOSS"
+    
+    # Strong Positive Signal Exception: Always hold winners with high confidence
+    elif pred > 0.2:
+        log.info("Hold %s (US): Strong positive signal (%.2f%%)", ticker, pred * 100)
+        return None, 0.0
+
     # 2. STRONG NEGATIVE SIGNAL
     elif pred < -0.01:
         sell_reason = "NEGATIVE_SIGNAL"

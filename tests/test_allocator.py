@@ -8,10 +8,11 @@ def test_allocator_normalization():
     tickers = ["AAPL", "TSLA", "MSFT"]
     scores = {"AAPL": 0.1, "TSLA": 0.05, "MSFT": 0.02}
     volomap = {"AAPL": 0.1, "TSLA": 0.2, "MSFT": 0.05}
+    prices = {"AAPL": 150.0, "TSLA": 200.0, "MSFT": 300.0}
     total_capital = 1000.0
     
     with patch('strategy.allocator.get_industry', return_value="Tech"):
-        allocator = SmartAllocator(tickers, scores, volomap, total_capital)
+        allocator = SmartAllocator(tickers, scores, volomap, total_capital, prices)
         allocation = allocator.allocate()
         
         weights = list(allocation.values())
@@ -22,9 +23,10 @@ def test_allocator_ranking():
     tickers = ["A", "B"]
     scores = {"A": 0.2, "B": 0.1}
     volomap = {"A": 0.1, "B": 0.1}
+    prices = {"A": 100.0, "B": 50.0}
     
     with patch('strategy.allocator.get_industry', return_value="Common"):
-        allocator = SmartAllocator(tickers, scores, volomap, 1000.0)
+        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, prices)
         allocation = allocator.allocate()
         
         assert allocation["A"] > allocation["B"]
@@ -35,10 +37,11 @@ def test_industry_penalty():
     tickers = ["T1", "T2", "T3", "T4", "T5"]
     scores = {t: 0.1 for t in tickers}
     volomap = {t: 0.1 for t in tickers}
+    prices = {t: 100.0 for t in tickers}
     
     # We'll mock get_industry to return "Tech" for all
     with patch('strategy.allocator.get_industry', return_value="Tech"):
-        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, industry_cap=0.4)
+        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, prices)
         allocation = allocator.allocate()
         
         # Since they are all in same industry, and they would have 20% each (sum=100% > 40%)
@@ -50,13 +53,14 @@ def test_industry_penalty():
     tickers = ["Tech1", "Tech2", "Other"]
     scores = {"Tech1": 0.5, "Tech2": 0.5, "Other": 0.1}
     volomap = {"Tech1": 0.1, "Tech2": 0.1, "Other": 0.1}
+    prices = {t: 100.0 for t in tickers}
     
     def mock_ind(t):
         return "Tech" if t.startswith("Tech") else "Other"
 
     with patch('strategy.allocator.get_industry', side_effect=mock_ind):
-        # Tech1+Tech2 together will have huge weight > 40%
-        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, industry_cap=0.4)
+        # Tech1+Tech2 together will have huge weight
+        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, prices)
         allocation = allocator.allocate()
         
         # Without penalty, Tech1 and Tech2 would dominate. 
@@ -68,15 +72,11 @@ def test_max_position_cap():
     tickers = ["Winner", "Loser"]
     scores = {"Winner": 1.0, "Loser": 0.01}
     volomap = {"Winner": 0.1, "Loser": 0.1}
+    prices = {"Winner": 100.0, "Loser": 50.0}
     
     with patch('strategy.allocator.get_industry', return_value="Misc"):
-        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, max_stock_cap=0.2)
+        allocator = SmartAllocator(tickers, scores, volomap, 1000.0, prices)
         allocation = allocator.allocate()
         
-        # Even though Winner is 100x better, it should be capped at 0.2
-        # BUT wait, the final allocation depends on renormalization.
-        # If there are only 2 stocks, and one is capped at 0.2, the other MUST take 0.8
-        # unless we allow cash. The prompt says "weights sum to 1".
-        # So if one is capped at 0.2, and there is only one other, the other gets 0.8.
-        # This is logical if we want to be fully invested.
-        assert allocation["Winner"] <= 0.200001
+        # Winner is 100x better so it should dominate now that max_position_cap is removed
+        assert allocation["Winner"] > 0.9

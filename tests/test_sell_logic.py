@@ -82,6 +82,7 @@ def test_risk_reduction_losing():
     """Verify risk reduction for losing positions with weak signals."""
     pos = {
         "ticker": "RELIANCE.NS",
+        "buy_date": "2026-01-01",
         "buy_price": 2500.0,
         "shares": 10.0,
         "stop_loss": 0.9
