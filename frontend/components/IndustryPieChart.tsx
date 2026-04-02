@@ -3,12 +3,33 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, L
 
 const COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f43f5e', '#facc15', '#10b981', '#14b8a6', '#0ea5e9']
 
-export default function IndustryPieChart({ portfolio, livePrices, sectors }: { portfolio: any[], livePrices: Record<string, number>, sectors: Record<string, string> }) {
+export default function IndustryPieChart({ 
+  portfolio, 
+  livePrices, 
+  sectors,
+  currency = 'USD',
+  fxRate = 83.5
+}: { 
+  portfolio: any[], 
+  livePrices: Record<string, number>, 
+  sectors: Record<string, string>,
+  currency?: 'USD' | 'INR',
+  fxRate?: number
+}) {
   const dataMap: Record<string, number> = {}
   
+  const symbol = currency === 'INR' ? '₹' : '$'
+  const locale = currency === 'INR' ? 'en-IN' : 'en-US'
+
   portfolio.forEach(p => {
     const sector = sectors[p.ticker] || 'Unknown'
-    const val = Number(p.shares) * (livePrices[p.ticker] || p.buy_price)
+    const tickerCurrency = p.ticker.endsWith('.NS') ? 'INR' : 'USD'
+    let val = Number(p.shares) * (livePrices[p.ticker] || p.buy_price)
+    
+    // Normalization to display currency
+    if (currency === 'INR' && tickerCurrency === 'USD') val *= fxRate
+    else if (currency === 'USD' && tickerCurrency === 'INR') val /= fxRate
+
     dataMap[sector] = (dataMap[sector] || 0) + val
   })
 
@@ -37,7 +58,7 @@ export default function IndustryPieChart({ portfolio, livePrices, sectors }: { p
             ))}
           </Pie>
           <RechartsTooltip 
-            formatter={(value: any) => [`$${Number(value).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, 'Value']}
+            formatter={(value: any) => [`${symbol}${Number(value).toLocaleString(locale, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`, 'Value']}
             contentStyle={{ backgroundColor: '#171717', borderColor: '#262626', borderRadius: '12px', color: '#fff', boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5)' }}
             itemStyle={{ color: '#fff', fontWeight: 500 }}
           />

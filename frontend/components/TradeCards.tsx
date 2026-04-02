@@ -2,8 +2,31 @@
 
 import { useState } from 'react'
 
-export default function TradeCards({ trades }: { trades: any[] }) {
+export default function TradeCards({ 
+  trades,
+  currency = 'USD',
+  fxRate = 83.5
+}: { 
+  trades: any[];
+  currency?: 'USD' | 'INR';
+  fxRate?: number;
+}) {
   const [filter, setFilter] = useState<'ALL' | 'BUY' | 'SELL'>('ALL')
+  
+  const symbol = currency === 'INR' ? '₹' : '$'
+  const locale = currency === 'INR' ? 'en-IN' : 'en-US'
+
+  const format = (v: number) => {
+    return `${symbol}${Math.abs(v).toLocaleString(locale, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+  }
+
+  const convert = (val: number, ticker: string) => {
+    const tickerCurrency = ticker.endsWith('.NS') ? 'INR' : 'USD'
+    if (currency === tickerCurrency) return val
+    if (currency === 'INR' && tickerCurrency === 'USD') return val * fxRate
+    if (currency === 'USD' && tickerCurrency === 'INR') return val / fxRate
+    return val
+  }
   
   if (!trades.length) return <div className="text-gray-500 p-4 font-medium flex items-center justify-center h-full">No recent trades.</div>
 
@@ -55,8 +78,8 @@ export default function TradeCards({ trades }: { trades: any[] }) {
                   <p className="text-sm text-gray-400 mt-0.5">Shares: <span className="font-mono text-gray-300">{Number(trade.shares).toFixed(4)}</span></p>
                 </div>
                 <div className="text-right">
-                  <p className="font-semibold text-gray-100 tracking-tight">${Number(trade.price * trade.shares).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-                  <p className="text-xs text-gray-500 mt-1 font-mono">@ ${Number(trade.price).toFixed(2)}</p>
+                  <p className="font-semibold text-gray-100 tracking-tight">{format(convert(Number(trade.price * trade.shares), trade.ticker))}</p>
+                  <p className="text-xs text-gray-500 mt-1 font-mono">@ {format(convert(Number(trade.price), trade.ticker))}</p>
                 </div>
               </div>
             </div>

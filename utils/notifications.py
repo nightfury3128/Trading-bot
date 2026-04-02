@@ -16,18 +16,27 @@ def send_discord(message: str):
         log.error("Discord error: %s", e)
 
 
+from utils.currency import get_currency, get_conversion_rates, format_currency
+
 def discord_trade_alert(action: str, ticker: str, price: float, shares: float):
     shares = float(shares)
     price = float(price)
-    allocation = shares * price
+    currency = get_currency(ticker)
+    inr_to_usd, _ = get_conversion_rates()
+    
+    local_allocation = shares * price
+    
+    icon = "🇮🇳" if currency == "INR" else "🇺🇸"
+    market_name = "INDIA MARKET" if currency == "INR" else "US MARKET"
+    
     msg = (
-        "**TRADE ALERT**\n"
+        f"**{icon} {market_name} TRADE ALERT**\n"
         f"- Action: {action}\n"
         f"- Ticker: {ticker}\n"
-        f"- Investment: ${allocation:.2f}\n"
-        f"- Price: ${price:.2f}\n"
+        f"- Net Value: {format_currency(local_allocation, currency, inr_to_usd if currency == 'INR' else None)}\n"
+        f"- Price: {format_currency(price, currency)}\n"
         f"- Shares: {shares:.4f}\n"
-        f"- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"- Time: {datetime.now().strftime('%H:%M:%S')}\n"
     )
     send_discord(msg)
 
@@ -35,10 +44,9 @@ def discord_trade_alert(action: str, ticker: str, price: float, shares: float):
 def discord_portfolio_summary(
     *,
     run_date: str,
-    cash: float,
-    invested: float,
-    total_value: float,
-    pl_unrealized: float = None,
+    cash_usd: float,
+    cash_inr: float,
+    pl_unrealized_usd: float = None, # Global P/L
     top_picks: list = None,
     positions: dict = None,
     prices: dict = None,
@@ -48,43 +56,80 @@ def discord_portfolio_summary(
     prices = prices or {}
     top_picks = top_picks or []
     position_actions = position_actions or {}
+    
+    inr_to_usd, usd_to_inr = get_conversion_rates()
+    
+    # Marketplace calculations
+    us_invested = 0.0
+    us_value = 0.0
+    in_invested = 0.0
+    in_value = 0.0
+    
+    us_rows = []
+    in_rows = []
+    
+    for ticker, pos in positions.items():
+        price = float(prices.get(ticker) or 0.0)
+        shares = float(pos.get("shares") or 0.0)
+        buy_price = float(pos.get("buy_price") or 0.0)
+        currency = pos.get("currency", get_currency(ticker))
+        
+        inv_local = shares * buy_price
+        val_local = shares * price
+        pnl_local = val_local - inv_local
+        pnl_pct = (pnl_local / inv_local) * 100 if inv_local > 0 else 0.0
+        
+        from utils.currency import normalize_to_usd
+        inv_usd = normalize_to_usd(inv_local, currency, inr_to_usd)
+        
+        action = position_actions.get(ticker, "HOLD")
+        val_str = format_currency(val_local, currency, inr_to_usd if currency == 'INR' else None)
+        row_str = f"- **{ticker}**: {shares:.4f} shares ({val_str}) | P/L: {pnl_pct:+.2f}%"
+        
+        if currency == "INR":
+            in_invested += inv_local
+            in_value += val_local
+            in_rows.append((inv_usd, row_str))
+        else:
+            us_invested += inv_local
+            us_value += val_local
+            us_rows.append((inv_usd, row_str))
+
+    us_pnl = us_value - us_invested
+    in_pnl = in_value - in_invested
+    
+    global_val_usd = us_value + (in_value * inr_to_usd) + cash_usd + (cash_inr * inr_to_usd)
+    
     msg = "@everyone\n"
-    msg += f"**PORTFOLIO UPDATE** ({run_date})\n\n"
-    msg += f"**Amount Invested**: ${invested:.2f}\n"
-    msg += f"**Capital Left**: ${cash:.2f}\n"
-    if pl_unrealized is not None:
-        msg += f"**P/L Unrealized**: ${pl_unrealized:.2f}\n"
-    msg += f"**Total Value**: ${total_value:.2f}\n"
+    msg += f"🌎 **GLOBAL PORTFOLIO UPDATE** ({run_date})\n"
+    msg += f"💰 **Total Net Value**: ${global_val_usd:.2f}\n\n"
+    
+    # US SECTION
+    msg += "🇺🇸 **US MARKET SUMMARY**\n"
+    msg += f"- Total Value: ${us_value + cash_usd:.2f}\n"
+    msg += f"- Invested: ${us_invested:.2f}\n"
+    msg += f"- Cash: ${cash_usd:.2f}\n"
+    msg += f"- P/L Unrealized: ${us_pnl:+.2f} ({ (us_pnl/us_invested*100) if us_invested > 0 else 0:+.2f}%)\n"
+    if us_rows:
+        us_rows.sort(key=lambda x: x[0], reverse=True)
+        for _, r in us_rows[:10]: msg += r + "\n"
+    msg += "\n"
 
-    msg += "\n**Top picks**\n"
+    # INDIA SECTION
+    msg += "🇮🇳 **INDIA MARKET SUMMARY**\n"
+    msg += f"- Total Value: ₹{in_value + cash_inr:.2f}\n"
+    msg += f"- Invested: ₹{in_invested:.2f}\n"
+    msg += f"- Cash: ₹{cash_inr:.2f}\n"
+    msg += f"- P/L Unrealized: ₹{in_pnl:+.2f} ({ (in_pnl/in_invested*100) if in_invested > 0 else 0:+.2f}%)\n"
+    if in_rows:
+        in_rows.sort(key=lambda x: x[0], reverse=True)
+        for _, r in in_rows[:10]: msg += r + "\n"
+
+    msg += "\n--- **Top Potential Picks** ---\n"
     if top_picks:
-        for ticker, score in top_picks:
-            msg += f"- {ticker}: {score:.4f}\n"
-    else:
-        msg += "- None\n"
-
-    msg += "\n**Positions**\n"
-    if not positions:
-        msg += "- None\n"
-    else:
-        rows = []
-        for ticker, pos in positions.items():
-            price = float(prices.get(ticker) or 0.0)
-            shares = float(pos.get("shares") or 0.0)
-            buy_price = float(pos.get("buy_price") or 0.0)
-            invested_amt = shares * buy_price
-            value = shares * price
-            pnl_amt = value - invested_amt
-            pnl_pct = (pnl_amt / invested_amt) * 100 if invested_amt > 0 else 0.0
-            action = position_actions.get(ticker, "HOLD")
-            rows.append((invested_amt, ticker, value, pnl_amt, pnl_pct, action, shares))
-
-        rows.sort(key=lambda x: x[0], reverse=True)  # by invested amount
-        for invested_amt, ticker, value, pnl_amt, pnl_pct, action, shares in rows:
-            msg += (
-                f"- {ticker}: {shares:.4f} shares (${value:.2f}) | invested=${invested_amt:.2f} | "
-                f"P/L=${pnl_amt:.2f} ({pnl_pct:.2f}%) | action={action}\n"
-            )
+        for ticker, score in top_picks[:5]:
+            icon = "🇮🇳" if ticker.endswith(".NS") else "🇺🇸"
+            msg += f"{icon} {ticker}: {score:.4f}\n"
 
     send_discord(msg)
 

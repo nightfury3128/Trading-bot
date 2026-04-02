@@ -13,21 +13,25 @@ def get_industry(ticker: str) -> str:
 
 
 def calculate_industry_exposures(
-    positions: dict, prices: dict
+    positions: dict, prices: dict, inr_to_usd: float = 1.0
 ) -> tuple[float, dict[str, float]]:
-    """Calculate total portfolio value and current industry exposures."""
-    total_portfolio_value = 0.0
-    industry_exposure = {}
+    """Calculate total portfolio value and current industry exposures, normalized to USD."""
+    from utils.currency import normalize_to_usd, get_currency
+    total_portfolio_value_usd = 0.0
+    industry_exposure_usd = {}
 
     for ticker, pos in positions.items():
-        px = prices.get(ticker, float(pos["buy_price"]))
-        val = float(pos["shares"]) * px
-        total_portfolio_value += val
-
+        px = prices.get(ticker, float(pos.get("buy_price", 0)))
+        currency = pos.get("currency", get_currency(ticker))
+        
+        local_val = float(pos.get("shares", 0)) * px
+        usd_val = normalize_to_usd(local_val, currency, inr_to_usd)
+        
+        total_portfolio_value_usd += usd_val
         ind = get_industry(ticker)
-        industry_exposure[ind] = industry_exposure.get(ind, 0.0) + val
+        industry_exposure_usd[ind] = industry_exposure_usd.get(ind, 0.0) + usd_val
 
-    return total_portfolio_value, industry_exposure
+    return total_portfolio_value_usd, industry_exposure_usd
 
 
 def check_industry_cap(

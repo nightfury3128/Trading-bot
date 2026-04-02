@@ -5,12 +5,16 @@ from utils.notifications import discord_trade_alert
 
 
 def log_trade(action: str, ticker: str, price: float, shares: float):
+    from utils.currency import get_currency
+    currency = get_currency(ticker)
+    
     log.info(
-        "TRADE: action=%s ticker=%s price=%.6f shares=%s",
+        "TRADE: action=%s ticker=%s price=%.6f shares=%s currency=%s",
         action,
         ticker,
         float(price),
         shares,
+        currency
     )
     try:
         discord_trade_alert(action, ticker, float(price), float(shares))
@@ -24,6 +28,7 @@ def log_trade(action: str, ticker: str, price: float, shares: float):
             "ticker": ticker,
             "price": float(price),
             "shares": float(shares),
+            "currency": currency
         }
     ).execute()
 

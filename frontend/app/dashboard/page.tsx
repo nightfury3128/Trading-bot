@@ -8,6 +8,9 @@ import TradeCards from '@/components/TradeCards'
 import PortfolioTable from '@/components/PortfolioTable'
 import PerformanceGraph from '@/components/PerformanceGraph'
 import IndustryPieChart from '@/components/IndustryPieChart'
+import FXTracker from '@/components/FXTracker'
+import MarketWeightChart from '@/components/MarketWeightChart'
+import TopPredictionsChart from '@/components/TopPredictionsChart'
 import { LogOut, RefreshCw } from 'lucide-react'
 
 export default function Dashboard() {
@@ -17,6 +20,8 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [data, setData] = useState<any>(null)
+  const [displayCurrency, setDisplayCurrency] = useState<'USD' | 'INR'>('INR')
+  const [marketFilter, setMarketFilter] = useState<'ALL' | 'US' | 'INDIA'>('ALL')
   
   const fetchData = async () => {
     setRefreshing(true)
@@ -38,7 +43,6 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchData()
-    // Auto refresh every 60 seconds
     const interval = setInterval(fetchData, 60000)
     return () => clearInterval(interval)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -65,26 +69,70 @@ export default function Dashboard() {
     )
   }
 
-  const { portfolio, trades, performance, account, livePrices, sectors } = data
-  let investedValue = 0
-  let currentPortfolioValue = 0
+  const { portfolio: fullPortfolio, trades: fullTrades, performance, account, livePrices, sectors, fxRate } = data
   
-  portfolio.forEach((p: any) => {
-    const currentPrice = livePrices[p.ticker] || p.buy_price
-    investedValue += Number(p.shares) * p.buy_price
-    currentPortfolioValue += Number(p.shares) * currentPrice
+  // Filtering
+  const filteredPortfolio = fullPortfolio.filter((p: any) => {
+    if (marketFilter === 'US') return !p.ticker.endsWith('.NS')
+    if (marketFilter === 'INDIA') return p.ticker.endsWith('.NS')
+    return true
   })
   
-  const totalValue = account.cash + currentPortfolioValue
-  const unrealizedPnL = currentPortfolioValue - investedValue
+  const filteredTrades = fullTrades.filter((t: any) => {
+    if (marketFilter === 'US') return !t.ticker.endsWith('.NS')
+    if (marketFilter === 'INDIA') return t.ticker.endsWith('.NS')
+    return true
+  })
+
+  // Value Calculations
+  let investedValueBase = 0 // in native currency logic, but usually stored in db
+  let currentPortfolioValueBase = 0
+  
+  // For global stats, we convert everything to display currency
+  let totalInvestedValue = 0
+  let totalCurrentValue = 0
+  
+  filteredPortfolio.forEach((p: any) => {
+    const currentPrice = livePrices[p.ticker] || p.buy_price
+    const tickerCurrency = p.ticker.endsWith('.NS') ? 'INR' : 'USD'
+    
+    // Convert to display currency
+    let valInvested = Number(p.shares) * p.buy_price
+    let valCurrent = Number(p.shares) * currentPrice
+    
+    if (displayCurrency === 'INR' && tickerCurrency === 'USD') {
+      valInvested *= fxRate
+      valCurrent *= fxRate
+    } else if (displayCurrency === 'USD' && tickerCurrency === 'INR') {
+      valInvested /= fxRate
+      valCurrent /= fxRate
+    }
+    
+    totalInvestedValue += valInvested
+    totalCurrentValue += valCurrent
+  })
+  
+  // Cash balance logic
+  let displayCash = 0
+  if (marketFilter === 'US') {
+     displayCash = displayCurrency === 'INR' ? account.cash_usd * fxRate : account.cash_usd
+  } else if (marketFilter === 'INDIA') {
+     displayCash = displayCurrency === 'USD' ? account.cash_inr / fxRate : account.cash_inr
+  } else {
+     // ALL
+     const total_usd = account.cash_usd + (account.cash_inr / fxRate)
+     displayCash = displayCurrency === 'INR' ? total_usd * fxRate : total_usd
+  }
+
+  const totalValue = displayCash + totalCurrentValue
+  const unrealizedPnL = totalCurrentValue - totalInvestedValue
 
   let dailyChange = 0
   if (performance && performance.length >= 2) {
     const last = performance[performance.length - 1].total_value
     const prev = performance[performance.length - 2].total_value
     dailyChange = last - prev
-  } else if (performance && performance.length === 1) {
-    dailyChange = totalValue - performance[0].total_value
+    if (displayCurrency === 'INR') dailyChange *= fxRate
   }
 
   return (
@@ -97,71 +145,125 @@ export default function Dashboard() {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
               </svg>
             </div>
-            <h1 className="text-3xl font-bold text-white tracking-tight">Trading Dashboard</h1>
+            <h1 className="text-3xl font-bold text-white tracking-tight">Global Dashboard</h1>
           </div>
-          <p className="text-gray-400 ml-11">Live Portfolio Overview &amp; ML Models</p>
         </div>
-        <div className="flex items-center gap-3 w-full md:w-auto">
-          <button 
-            onClick={fetchData} 
-            disabled={refreshing}
-            className="flex-1 md:flex-none py-2 px-4 bg-[#171717] border border-gray-800 rounded-xl hover:bg-[#202020] transition-colors flex items-center justify-center disabled:opacity-50 group shadow-sm text-sm font-medium"
-            title="Refresh Data"
-          >
-            <RefreshCw className={`w-4 h-4 text-gray-400 group-hover:text-white mr-2 ${refreshing ? 'animate-spin' : ''}`} />
-            {refreshing ? 'Syncing...' : 'Sync Data'}
-          </button>
-          <button 
-            onClick={handleLogout} 
-            className="flex-1 md:flex-none flex items-center justify-center gap-2 bg-rose-500/10 text-rose-500 border border-rose-500/20 hover:bg-rose-500/20 px-4 py-2 rounded-xl transition-all font-medium text-sm"
-          >
-            <LogOut className="w-4 h-4" />
-            Logout
-          </button>
+
+        <div className="flex flex-wrap items-center gap-6 w-full md:w-auto">
+          <FXTracker fxRate={fxRate} fxHistory={data.fxHistory || []} />
+          
+          <div className="flex items-center gap-3">
+            <div className="flex bg-[#171717] p-1 rounded-xl border border-gray-800">
+            {['ALL', 'US', 'INDIA'].map((m) => (
+              <button
+                key={m}
+                onClick={() => setMarketFilter(m as any)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${marketFilter === m ? 'bg-blue-500 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex bg-[#171717] p-1 rounded-xl border border-gray-800">
+            {['INR', 'USD'].map((c) => (
+              <button
+                key={c}
+                onClick={() => setDisplayCurrency(c as any)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${displayCurrency === c ? 'bg-emerald-500 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button 
+                onClick={fetchData} 
+                disabled={refreshing}
+                className="py-2 px-4 bg-[#171717] border border-gray-800 rounded-xl hover:bg-[#202020] transition-colors flex items-center justify-center disabled:opacity-50 group shadow-sm text-sm font-medium"
+            >
+                <RefreshCw className={`w-4 h-4 text-gray-400 group-hover:text-white ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button 
+                onClick={handleLogout} 
+                className="flex items-center justify-center gap-2 bg-rose-500/10 text-rose-500 border border-rose-500/20 hover:bg-rose-500/20 px-4 py-2 rounded-xl transition-all font-medium text-sm"
+            >
+                <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
+      </div>
       </header>
 
       <main className="max-w-7xl mx-auto space-y-8">
         <PortfolioSummary 
           totalValue={totalValue} 
-          cash={account.cash} 
-          positionsCount={portfolio.length} 
+          cash={displayCash} 
+          positionsCount={filteredPortfolio.length} 
           dailyChange={dailyChange} 
-          investedAmount={investedValue}
+          investedAmount={totalInvestedValue}
           unrealizedPnL={unrealizedPnL}
+          currency={displayCurrency}
         />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-8">
-            {/* Performance Line Chart */}
             <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 md:p-8 shadow-sm">
-              <PerformanceGraph data={performance} />
+              <PerformanceGraph data={performance} currency={displayCurrency} fxRate={fxRate} />
             </div>
 
-            {/* Positions Table */}
             <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 md:p-8 shadow-sm">
               <div className="flex items-center justify-between mb-6">
                 <h2 className="text-xl font-bold text-white tracking-tight">Active Positions</h2>
-                <span className="text-sm text-gray-400">{portfolio.length} Assets</span>
+                <span className="text-sm text-gray-400">{filteredPortfolio.length} Assets</span>
               </div>
-              <PortfolioTable portfolio={portfolio} livePrices={livePrices} totalInvestedValue={investedValue} />
+              <PortfolioTable 
+                portfolio={filteredPortfolio} 
+                livePrices={livePrices} 
+                totalInvestedValue={totalInvestedValue} 
+                currency={displayCurrency}
+                fxRate={fxRate}
+              />
             </div>
           </div>
           
           <div className="space-y-8">
-            {/* Sector Pie Chart */}
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 md:p-8 shadow-sm">
-              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Sector Allocation</h2>
-              <IndustryPieChart portfolio={portfolio} livePrices={livePrices} sectors={sectors || {}} />
+            {/* NEW: Portfolio Weighting Chart */}
+            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm">
+              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Capital Allocation</h2>
+              <MarketWeightChart 
+                 portfolio={fullPortfolio} 
+                 cash_usd={account.cash_usd} 
+                 cash_inr={account.cash_inr} 
+                 fxRate={fxRate} 
+              />
             </div>
 
-            {/* Recent Trades List */}
-            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 md:p-8 shadow-sm flex flex-col max-h-[600px]">
+            {/* Asset Allocation Pie Chart */}
+            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm">
+              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Industry Breakdown</h2>
+              <IndustryPieChart 
+                portfolio={filteredPortfolio} 
+                livePrices={livePrices} 
+                sectors={sectors || {}} 
+                currency={displayCurrency}
+                fxRate={fxRate}
+              />
+            </div>
+
+            {/* NEW: ML Top Prediction Signals */}
+            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm">
+              <h2 className="text-xl font-bold text-white tracking-tight mb-8">Trade Signals</h2>
+              <TopPredictionsChart scores={data.ml_scores || {}} />
+            </div>
+
+            <div className="bg-[#171717] border border-gray-800 rounded-3xl p-6 shadow-sm flex flex-col max-h-[400px]">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-xl font-bold text-white tracking-tight">Recent Trades</h2>
+                <h2 className="text-xl font-bold text-white tracking-tight">Recent Activity</h2>
               </div>
               <div className="overflow-y-auto flex-1 pr-2 custom-scrollbar">
-                <TradeCards trades={trades} />
+                <TradeCards trades={filteredTrades} currency={displayCurrency} fxRate={fxRate} />
               </div>
             </div>
           </div>
