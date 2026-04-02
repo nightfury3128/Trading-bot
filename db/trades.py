@@ -4,22 +4,23 @@ from utils.logger import log
 from utils.notifications import discord_trade_alert
 
 
-def log_trade(action: str, ticker: str, price: float, shares: float, pnl: float = None, pnl_pct: float = None):
+def log_trade(action: str, ticker: str, price: float, shares: float, pnl: float = None, pnl_pct: float = None, entry_price: float = None, entry_date: str = None, remaining_shares: float = None):
     from utils.currency import get_currency
     currency = get_currency(ticker)
     
     log.info(
-        "TRADE: action=%s ticker=%s price=%.6f shares=%s currency=%s P/L=%.2f (%.2f%%)",
+        "TRADE: action=%s ticker=%s price=%.6f shares=%s currency=%s P/L=%.2f (%.2f%%) remaining=%s",
         action,
         ticker,
         float(price),
         shares,
         currency,
         pnl if pnl is not None else 0.0,
-        pnl_pct if pnl_pct is not None else 0.0
+        pnl_pct if pnl_pct is not None else 0.0,
+        remaining_shares if remaining_shares is not None else 0.0
     )
     try:
-        discord_trade_alert(action, ticker, float(price), float(shares))
+        discord_trade_alert(action, ticker, float(price), float(shares), remaining_shares=remaining_shares, pnl_pct=pnl_pct)
     except Exception as e:
         log.debug("discord_trade_alert failed: %s", e)
 
@@ -34,25 +35,31 @@ def log_trade(action: str, ticker: str, price: float, shares: float, pnl: float 
             "realized_pnl": float(pnl) if pnl is not None else 0.0,
             "pnl_pct": float(pnl_pct) if pnl_pct is not None else 0.0
         }
+        if entry_price is not None:
+             data["entry_price"] = float(entry_price)
+        if entry_date is not None:
+             data["entry_date"] = str(entry_date)
+        if remaining_shares is not None:
+             data["remaining_shares"] = float(remaining_shares)
+
         supabase.table("trades").insert(data).execute()
     except Exception as e:
-        # Fallback if P/L columns don't exist yet in Supabase schema cache
-        if "pnl" in str(e).lower() or "cache" in str(e).lower() or "204" in str(e):
-             log.warning("P/L columns not found in DB cache. Logging minimal record.")
-             try:
-                 minimal_data = {
-                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
-                     "action": action,
-                     "ticker": ticker,
-                     "price": float(price),
-                     "shares": float(shares),
-                     "currency": currency
-                 }
-                 supabase.table("trades").insert(minimal_data).execute()
-             except Exception as e2:
-                 log.error("Final DB fallback failed: %s", e2)
-        else:
-             log.error("Failed to log trade: %s", e)
+        # Fallback if new columns don't exist yet in Supabase schema cache
+        log.warning("Primary insert failed, likely missing columns (entry_price/entry_date): %s", e)
+        try:
+             minimal_data = {
+                 "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                 "action": action,
+                 "ticker": ticker,
+                 "price": float(price),
+                 "shares": float(shares),
+                 "currency": currency,
+                 "realized_pnl": float(pnl) if pnl is not None else 0.0,
+                 "pnl_pct": float(pnl_pct) if pnl_pct is not None else 0.0
+             }
+             supabase.table("trades").insert(minimal_data).execute()
+        except Exception as e2:
+             log.error("Final DB fallback failed: %s", e2)
 
 
 def get_recent_sells() -> set:

@@ -6,22 +6,23 @@ export default function PerformanceGraph({
   data, 
   currency = 'USD', 
   fxRate = 83.5,
-  benchmarkData = []
+  usBenchmarkData = [],
+  inBenchmarkData = []
 }: { 
   data: any[]; 
   currency?: 'USD' | 'INR';
   fxRate?: number;
-  benchmarkData?: any[];
+  usBenchmarkData?: any[];
+  inBenchmarkData?: any[];
 }) {
   const [timeFilter, setTimeFilter] = useState<'1W' | '1M' | 'ALL'>('ALL')
-  const [showBenchmark, setShowBenchmark] = useState(true)
+  const [showBenchmarks, setShowBenchmarks] = useState(true)
   
   const symbol = currency === 'INR' ? '₹' : '$'
   const locale = currency === 'INR' ? 'en-IN' : 'en-US'
 
   if (!data || data.length === 0) return <div className="text-center text-gray-500 font-medium p-8 flex items-center justify-center h-full">No performance records found.</div>
 
-  // Filter the data based on timeFilter
   const filteredData = data.filter((d) => {
     if (timeFilter === 'ALL') return true;
     const date = new Date(d.date)
@@ -37,44 +38,52 @@ export default function PerformanceGraph({
   // Fallback to plotting all data if filter returns nothing
   const targetPortfolio = filteredData.length > 0 ? filteredData : data
 
-  // Find corresponding benchmark period
+  // Normalization Bases
   const startVisibleDate = new Date(targetPortfolio[0]?.date || Date.now())
-  const filteredBenchmark = benchmarkData.filter(b => new Date(b.date) >= startVisibleDate)
-
-  // Normalization Base
   const portfolioBase = Number(targetPortfolio[0]?.total_value || 1)
-  const benchmarkBase = Number(filteredBenchmark[0]?.value || 1)
+
+  const fUsBench = usBenchmarkData.filter(b => new Date(b.date) >= startVisibleDate)
+  const fInBench = inBenchmarkData.filter(b => new Date(b.date) >= startVisibleDate)
+
+  const usBenchBase = Number(fUsBench[0]?.value || 1)
+  const inBenchBase = Number(fInBench[0]?.value || 1)
 
   const mergedData = targetPortfolio.map((d, i) => {
     let pValNative = Number(d.total_value)
     let pValDisplay = pValNative
     if (currency === 'INR') pValDisplay *= fxRate
 
-    // Find benchmark quote on this or nearest previous date
-    const bQuote = filteredBenchmark.find(b => b.date.split('T')[0] === d.date.split('T')[0]) || filteredBenchmark[i]
-    let bValNormalized = bQuote ? (Number(bQuote.value) / benchmarkBase) * portfolioBase : null
-    if (bValNormalized && currency === 'INR') bValNormalized *= fxRate
+    const dateKey = d.date.split('T')[0]
+    
+    const usQuote = fUsBench.find(b => b.date.split('T')[0] === dateKey) || fUsBench[i]
+    let usValNorm = usQuote ? (Number(usQuote.value) / usBenchBase) * portfolioBase : null
+    if (usValNorm && currency === 'INR') usValNorm *= fxRate
+
+    const inQuote = fInBench.find(b => b.date.split('T')[0] === dateKey) || fInBench[i]
+    let inValNorm = inQuote ? (Number(inQuote.value) / inBenchBase) * portfolioBase : null
+    if (inValNorm && currency === 'INR') inValNorm *= fxRate
 
     return {
-      date: d.date.split('T')[0],
+      date: dateKey,
       portfolio: pValDisplay,
-      benchmark: bValNormalized,
+      usMarket: usValNorm,
+      inMarket: inValNorm,
     }
   })
 
-  const minVal = Math.min(...mergedData.map(d => Math.min(d.portfolio, d.benchmark || d.portfolio))) * 0.98
-  const maxVal = Math.max(...mergedData.map(d => Math.max(d.portfolio, d.benchmark || d.portfolio))) * 1.02
+  const minVal = Math.min(...mergedData.map(d => Math.min(d.portfolio, d.usMarket || d.portfolio, d.inMarket || d.portfolio))) * 0.98
+  const maxVal = Math.max(...mergedData.map(d => Math.max(d.portfolio, d.usMarket || d.portfolio, d.inMarket || d.portfolio))) * 1.02
 
   return (
     <div className="flex flex-col h-full w-full">
       <div className="flex items-center justify-between mb-8 overflow-x-auto pb-2 gap-4">
         <div className="flex items-center gap-4">
-          <h2 className="text-xl font-bold text-white tracking-tight whitespace-nowrap">Performance vs Benchmark</h2>
+          <h2 className="text-xl font-bold text-white tracking-tight whitespace-nowrap">Performance vs Benchmarks</h2>
           <button 
-            onClick={() => setShowBenchmark(!showBenchmark)}
-            className={`px-3 py-1 text-[10px] font-black uppercase rounded-lg border transition-all ${showBenchmark ? 'bg-blue-500/10 border-blue-500 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+            onClick={() => setShowBenchmarks(!showBenchmarks)}
+            className={`px-3 py-1 text-[10px] font-black uppercase rounded-lg border transition-all ${showBenchmarks ? 'bg-blue-500/10 border-blue-500 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
           >
-            {showBenchmark ? 'Hide SPY' : 'Show SPY'}
+            {showBenchmarks ? 'Hide Markets' : 'Show Markets'}
           </button>
         </div>
         <div className="flex gap-2">
@@ -90,14 +99,14 @@ export default function PerformanceGraph({
           <XAxis 
             dataKey="date" 
             stroke="#525252" 
-            fontSize={12} 
+            fontSize={11} 
             tickLine={false} 
             axisLine={false}
             dy={10}
           />
           <YAxis 
             stroke="#525252" 
-            fontSize={12} 
+            fontSize={11} 
             tickLine={false} 
             axisLine={false}
             tickFormatter={(val) => `${symbol}${val.toLocaleString(locale)}`}
@@ -105,18 +114,18 @@ export default function PerformanceGraph({
           />
           <Tooltip 
             contentStyle={{ backgroundColor: '#171717', borderColor: '#262626', borderRadius: '12px', boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5)' }}
-            itemStyle={{ color: '#fff', fontWeight: 600, fontSize: '14px' }}
+            itemStyle={{ fontWeight: 600, fontSize: '12px' }}
             formatter={(value: any) => [`${symbol}${Number(value).toLocaleString(locale, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`]}
-            labelStyle={{ color: '#a3a3a3', marginBottom: '8px', fontSize: '13px' }}
+            labelStyle={{ color: '#a3a3a3', marginBottom: '8px', fontSize: '11px' }}
           />
           <Legend 
              verticalAlign="top" 
              align="right" 
              iconType="circle"
-             wrapperStyle={{ paddingBottom: '20px', fontSize: '12px' }}
+             wrapperStyle={{ paddingBottom: '20px', fontSize: '11px' }}
           />
           <Line 
-            name="Portfolio"
+            name="My Portfolio"
             type="monotone" 
             dataKey="portfolio" 
             stroke="#3b82f6" 
@@ -125,18 +134,31 @@ export default function PerformanceGraph({
             activeDot={{ r: 6, fill: '#3b82f6', stroke: '#0a0a0a', strokeWidth: 3 }}
             animationDuration={1500}
           />
-          {showBenchmark && (
-            <Line 
-              name="S&P 500 (Normalized)"
-              type="monotone" 
-              dataKey="benchmark" 
-              stroke="#525252" 
-              strokeWidth={2} 
-              strokeDasharray="5 5"
-              dot={false}
-              activeDot={{ r: 4, fill: '#525252', stroke: '#0a0a0a', strokeWidth: 2 }}
-              animationDuration={1500}
-            />
+          {showBenchmarks && (
+            <>
+              <Line 
+                name="S&P 500 (US)"
+                type="monotone" 
+                dataKey="usMarket" 
+                stroke="#ef4444" 
+                strokeWidth={2} 
+                strokeDasharray="4 4"
+                dot={false}
+                activeDot={{ r: 4, fill: '#ef4444', stroke: '#0a0a0a', strokeWidth: 2 }}
+                animationDuration={1500}
+              />
+              <Line 
+                name="NIFTY 50 (India)"
+                type="monotone" 
+                dataKey="inMarket" 
+                stroke="#10b981" 
+                strokeWidth={2} 
+                strokeDasharray="4 4"
+                dot={false}
+                activeDot={{ r: 4, fill: '#10b981', stroke: '#0a0a0a', strokeWidth: 2 }}
+                animationDuration={1500}
+              />
+            </>
           )}
         </LineChart>
       </ResponsiveContainer>
