@@ -8,59 +8,48 @@ from config import (
     TOP_BUY_PICKS,
     MIN_PREDICTED_RETURN,
     INDUSTRY_CAP,
+    MIN_PREDICTED_RETURN_BUY,
 )
 from utils.logger import log
 from utils.time_utils import days_since, business_days_since
 from db.portfolio import get_portfolio, remove_position, add_position
 from db.trades import log_trade, get_recent_sells
 from strategy.risk import calculate_industry_exposures, check_industry_cap
+from utils.currency import get_currency, get_conversion_rates, normalize_to_usd
+from strategy import us_strategy, india_strategy
+
+
+def get_strategy(ticker):
+    """Routing logic for market-specific strategies."""
+    if ticker.endswith(".NS"):
+        return india_strategy
+    else:
+        return us_strategy
 
 
 def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> float:
-    """Evaluates and executes SELL rules with strict holding period constraints."""
+    """Evaluates and executes SELL rules routing to US/India strategies."""
     log.info("---------- SELL PHASE ----------")
+    
+    inr_to_usd, usd_to_inr = get_conversion_rates()
 
     for ticker, pos in list(positions.items()):
         price = prices.get(ticker)
         if price is None:
             continue
 
-        hold_days = business_days_since(pos["buy_date"])
-        buy_price = float(pos["buy_price"])
-        shares = float(pos["shares"])
-
-        # Rule 11: Strict No Day-Trading (Explicit same-day block)
-        if datetime.now().strftime("%Y-%m-%d") == pos["buy_date"]:
-            log.info("Sell blocked on %s: same-day check (No intraday trading allowed)", ticker)
-            continue
-
-        # New Strict Rule: MIN_HOLD_DAYS check MUST pass before any exit logic
-        if hold_days < MIN_HOLD_DAYS:
-            log.info("Sell blocked on %s due to MIN_HOLD_DAYS. Days held: %d/%d", ticker, hold_days, MIN_HOLD_DAYS)
-            continue
-
-        sell_reason = None
-        if price < buy_price * STOP_LOSS:
-            sell_reason = "STOP_LOSS"
-        elif price > buy_price * TAKE_PROFIT:
-            sell_reason = "TAKE_PROFIT"
-        elif ticker in scores and scores[ticker] < 0.4:
-            # We already passed the hold_days check above
-            sell_reason = "MODEL_SELL"
-
+        strategy = get_strategy(ticker)
+        score = scores.get(ticker)
+        
+        sell_reason, proceeds = strategy.handle_sell(ticker, pos, price, score)
+        
         if sell_reason:
-            execution_price = price * COST_SELL
-            proceeds = shares * execution_price
-            cash += proceeds
-            log_trade(sell_reason, ticker, execution_price, shares)
-            remove_position(ticker)
-            log.info(
-                "Execution: Sold %s: %s @ %.2f (proceeds %.2f)",
-                ticker,
-                sell_reason,
-                execution_price,
-                proceeds,
-            )
+            # Normalize proceeds to USD for the cash balance if needed
+            currency = get_currency(ticker)
+            proceeds_usd = normalize_to_usd(proceeds, currency, inr_to_usd)
+            cash += proceeds_usd
+            log.info("Execution: %s Sold %s for %.2f (%s) -> Normalized: $%.2f", 
+                     currency, ticker, proceeds, currency, proceeds_usd)
 
     return cash
 
@@ -71,32 +60,35 @@ def run_buy_phase(
     scores: dict,
     cash: float,
     portfolio: list,
+    base_currency: str = "USD"
 ) -> float:
-    """Evaluates and executes BUY rules with investment-style low frequency checks."""
-    log.info("---------- BUY PHASE ----------")
+    """Evaluates and executes BUY rules with multi-currency handling."""
+    log.info("---------- BUY PHASE (%s) ----------", base_currency)
     
-    from config import MIN_PREDICTED_RETURN_BUY
+    inr_to_usd, usd_to_inr = get_conversion_rates()
     
-    # Rule 7: "Low Activity" Filter - If best predicted return < 1% skip all buys
+    # Rule 7: "Low Activity" Filter
     if top_picks:
         best_ticker, _ = top_picks[0]
         best_pred = scores.get(best_ticker, 0.0)
         if best_pred < MIN_PREDICTED_RETURN_BUY:
-            log.info("Skipping trades due to low signal: best prediction (%.2f%%) < required (%.2f%%)", best_pred * 100, MIN_PREDICTED_RETURN_BUY * 100)
+            log.info("Skipping trades due to low signal: best prediction (%.2f%%) < required (%.2f%%)", 
+                     best_pred * 100, MIN_PREDICTED_RETURN_BUY * 100)
             return cash
 
-    positions = {p["ticker"]: p for p in portfolio}
-    cooldown_tickers = get_recent_sells()
-
-    # Calculate industry limits
-    total_portfolio_value, industry_exposure = calculate_industry_exposures(
-        positions, prices
+    positions_map = {p["ticker"]: p for p in portfolio}
+    
+    # Industry tracking remains in USD for global risk management
+    total_portfolio_value_usd, industry_exposure_usd = calculate_industry_exposures(
+        positions_map, prices, inr_to_usd
     )
-    total_portfolio_value += cash  # Total value for sizing includes current cash
+    
+    # Current cash value in USD for global sizing
+    cash_usd_equiv = normalize_to_usd(cash, base_currency, inr_to_usd)
+    total_portfolio_value_usd += cash_usd_equiv
 
-    log.info("Total Portfolio Value for Sizing: $%.2f", total_portfolio_value)
-    log.info("Current Industry Exposures: %s", industry_exposure)
-
+    log.info("Total Global Portfolio Value (USD): $%.2f", total_portfolio_value_usd)
+    
     if not top_picks:
         log.info("No picks provided for Buy phase.")
         return cash
@@ -104,8 +96,10 @@ def run_buy_phase(
     remaining_risk_score = sum(rs for _, rs in top_picks)
 
     for ticker, rs in top_picks:
-        if cash <= 5.1:  # Buffer for transaction costs
-            log.info("Skipped %s: out of cash ($%.2f remaining)", ticker, cash)
+        # Buffer check in local currency (roughly equivalent to $5.1 USD)
+        buffer = 5.1 if base_currency == "USD" else 5.1 * usd_to_inr
+        if cash <= buffer:
+            log.info("Skipped %s: out of cash (%.2f remaining)", ticker, cash)
             break
 
         price = prices.get(ticker)
@@ -114,54 +108,68 @@ def run_buy_phase(
             continue
 
         weight = rs / remaining_risk_score if remaining_risk_score > 0 else 1.0
-        allocation = cash * weight
+        allocation_local = cash * weight
+        allocation_usd = normalize_to_usd(allocation_local, base_currency, inr_to_usd)
 
-        if allocation < 5.0:
-            log.info("Skipped %s: allocation too small ($%.2f)", ticker, allocation)
+        if allocation_usd < 5.0:
+            log.info("Skipped %s: allocation too small ($%.2f)", ticker, allocation_usd)
             remaining_risk_score -= rs
             continue
 
-        # Industry Cap Check
+        # Industry Cap Check (using USD values for global limit)
         if not check_industry_cap(
-            ticker, allocation, total_portfolio_value, industry_exposure, INDUSTRY_CAP
+            ticker, allocation_usd, total_portfolio_value_usd, industry_exposure_usd, INDUSTRY_CAP
         ):
             remaining_risk_score -= rs
             continue
 
+        currency = get_currency(ticker)
+        
+        # NOTE: Since pools are separate, we expect ticker currency to match base_currency 
+        # or we might need explicit conversion if they differ. 
+        # For now, if ticker is INR and base is INR, execution_price is in INR.
+        
         # Execute Buy
-        execution_price = price * COST_BUY
-        shares = float(allocation / execution_price)
-        cost = shares * execution_price
+        execution_price_local = price * COST_BUY
+        shares = float(allocation_local / execution_price_local)
+        
+        # Rule: Indian market does not allow fractional shares
+        if ticker.endswith(".NS"):
+            shares = float(int(shares))
+            if shares == 0:
+                log.info("Skipped %s: allocation not enough for 1 full share", ticker)
+                remaining_risk_score -= rs
+                continue
+                
+        cost_local = shares * execution_price_local
+        cost_usd = normalize_to_usd(cost_local, currency, inr_to_usd)
 
-        if cost <= cash + 1e-6:
-            cash -= cost
+        if cost_local <= cash + 1e-6:
+            cash -= cost_local
             cash = max(0.0, cash)
             remaining_risk_score -= rs
 
-            add_position(ticker, shares, execution_price)
-            log_trade("BUY", ticker, execution_price, shares)
+            add_position(
+                ticker, 
+                shares, 
+                execution_price_local, 
+                currency=currency, 
+                local_val=cost_local, 
+                usd_val=cost_usd
+            )
+            log_trade("BUY", ticker, execution_price_local, shares)
 
-            # Update industry tracking for next picks in this same run
+            # Update industry tracking for next picks (USD)
             from strategy.risk import get_industry
-
             ind = get_industry(ticker)
-            industry_exposure[ind] = industry_exposure.get(ind, 0.0) + cost
+            industry_exposure_usd[ind] = industry_exposure_usd.get(ind, 0.0) + cost_usd
 
-            log.info(
-                "Bought %s: %.4f shares @ %.2f (cost %.2f)",
-                ticker,
-                shares,
-                execution_price,
-                cost,
-            )
-            log.info(
-                "DEBUG BUY | Pred Return: %.4f | Alloc: $%.2f | Cash Remaining: $%.2f",
-                scores[ticker],
-                allocation,
-                cash,
-            )
+            log.info("Bought %s: %.4f shares @ %.2f (%s)", 
+                     ticker, shares, execution_price_local, currency)
         else:
-            log.info("Skipped %s: insufficient cash for %.4f shares", ticker, shares)
+            log.info("Skipped %s: insufficient local cash", ticker)
             remaining_risk_score -= rs
 
     return cash
+
+

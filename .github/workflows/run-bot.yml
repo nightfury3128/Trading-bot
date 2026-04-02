@@ -9,6 +9,16 @@ on:
     # 1 hour before close (3:00 PM ET ≈ 19:00 UTC)
     - cron: "0 18 * * 1-5"
 
+    # --- INDIA MARKET (IST -> UTC) ---
+    # Open: 9:15 AM IST
+    - cron: "45 3 * * 1-5"
+    # Noon: 12:00 PM IST
+    - cron: "30 6 * * 1-5"
+    # 2 PM: 2:00 PM IST
+    - cron: "30 8 * * 1-5"
+    # Close: 3:30 PM IST
+    - cron: "0 10 * * 1-5"
+
 jobs:
   run:
     runs-on: ubuntu-latest

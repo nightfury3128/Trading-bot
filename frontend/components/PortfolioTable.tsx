@@ -1,6 +1,32 @@
 'use client'
 
-export default function PortfolioTable({ portfolio, livePrices, totalInvestedValue }: { portfolio: any[], livePrices: Record<string, number>, totalInvestedValue: number }) {
+export default function PortfolioTable({ 
+  portfolio, 
+  livePrices, 
+  totalInvestedValue,
+  currency = 'USD',
+  fxRate = 83.5
+}: { 
+  portfolio: any[], 
+  livePrices: Record<string, number>, 
+  totalInvestedValue: number,
+  currency?: 'USD' | 'INR',
+  fxRate?: number
+}) {
+  const symbol = currency === 'INR' ? '₹' : '$'
+  const locale = currency === 'INR' ? 'en-IN' : 'en-US'
+  
+  const format = (v: number) => {
+    return `${v < 0 ? '-' : ''}${symbol}${Math.abs(v).toLocaleString(locale, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`
+  }
+
+  const convert = (val: number, ticker: string) => {
+    const tickerCurrency = ticker.endsWith('.NS') ? 'INR' : 'USD'
+    if (currency === tickerCurrency) return val
+    if (currency === 'INR' && tickerCurrency === 'USD') return val * fxRate
+    if (currency === 'USD' && tickerCurrency === 'INR') return val / fxRate
+    return val
+  }
   return (
     <div className="overflow-x-auto rounded-lg border border-gray-800/50 bg-[#171717]/50">
       <table className="w-full text-left border-collapse">
@@ -17,11 +43,16 @@ export default function PortfolioTable({ portfolio, livePrices, totalInvestedVal
         </thead>
         <tbody className="divide-y divide-gray-800/50">
           {portfolio.map((pos, i) => {
-            const currentPrice = livePrices[pos.ticker] || pos.buy_price
+            const currentPriceNative = livePrices[pos.ticker] || pos.buy_price
+            const buyPriceNative = Number(pos.buy_price)
+            
+            const price = convert(currentPriceNative, pos.ticker)
+            const buyPrice = convert(buyPriceNative, pos.ticker)
+            
             const shares = Number(pos.shares)
-            const value = shares * currentPrice
-            const pnlTotal = value - (shares * pos.buy_price)
-            const pnl = ((currentPrice - pos.buy_price) / pos.buy_price) * 100
+            const value = shares * price
+            const pnlTotal = value - (shares * buyPrice)
+            const pnl = ((price - buyPrice) / buyPrice) * 100
             const allocation = totalInvestedValue > 0 ? (value / totalInvestedValue) * 100 : 0
             
             return (
@@ -33,9 +64,9 @@ export default function PortfolioTable({ portfolio, livePrices, totalInvestedVal
                   {pos.ticker}
                 </td>
                 <td className="py-4 px-5 text-gray-300 font-mono text-sm">{shares.toFixed(4)}</td>
-                <td className="py-4 px-5 text-gray-300 font-mono text-sm">${Number(pos.buy_price).toFixed(2)}</td>
-                <td className="py-4 px-5 text-gray-100 font-mono text-sm">${currentPrice.toFixed(2)}</td>
-                <td className="py-4 px-5 font-medium text-white tracking-tight">${value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+                <td className="py-4 px-5 text-gray-300 font-mono text-sm">{format(buyPrice)}</td>
+                <td className="py-4 px-5 text-gray-100 font-mono text-sm">{format(price)}</td>
+                <td className="py-4 px-5 font-medium text-white tracking-tight">{format(value)}</td>
                 <td className="py-4 px-5">
                   <div className="flex items-center gap-3">
                     <div className="flex-1 h-2 bg-gray-800/80 rounded-full overflow-hidden border border-gray-700/30">
@@ -47,7 +78,7 @@ export default function PortfolioTable({ portfolio, livePrices, totalInvestedVal
                 <td className="py-4 px-5 text-right font-medium">
                   <div className="flex flex-col items-end gap-1">
                     <span className={`text-sm ${pnlTotal >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {pnlTotal >= 0 ? '+' : '-'}${Math.abs(pnlTotal).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                      {format(pnlTotal)}
                     </span>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wide ${pnl > 0 ? 'bg-emerald-500/10 text-emerald-400' : pnl < 0 ? 'bg-rose-500/10 text-rose-400' : 'bg-gray-800 text-gray-400'}`}>
                       {pnl > 0 ? '+' : ''}{pnl.toFixed(2)}%

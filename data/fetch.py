@@ -18,6 +18,19 @@ def fetch_sp500_tickers() -> list[str]:
     return sorted(list(set(s.strip().upper().replace(".", "-") for s in raw)))
 
 
+def fetch_nifty500_tickers() -> list[str]:
+    log.info("Fetching Nifty 500 tickers...")
+    try:
+        url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+        df = pd.read_csv(url)
+        # Nifty tickers usually need .NS suffix for yfinance
+        tickers = [f"{s}.NS" for s in df["Symbol"].tolist()]
+        return sorted(list(set(tickers)))
+    except Exception as e:
+        log.error("Failed to fetch Nifty 500: %s", e)
+        return []
+
+
 def split_bulk_ohlcv(raw: pd.DataFrame, tickers: list) -> dict[str, pd.DataFrame]:
     out = {}
     if raw is None or raw.empty:

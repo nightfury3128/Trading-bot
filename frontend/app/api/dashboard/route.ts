@@ -29,13 +29,47 @@ export async function GET() {
   const performance = perfRes.data || []
   const account = accountRes.data || { cash: 0 }
 
-  // Fetch live prices via Yahoo Finance
+  // Fetch live prices and FX rate via Yahoo Finance
   const tickers = portfolio.map((p: any) => p.ticker)
   const livePrices: Record<string, number> = {}
   const sectors: Record<string, string> = {}
+  let fxRate = 83.5 // Fallback
+  let fxHistory: any[] = []
+  let benchmarkData: any[] = []
   
-  if (tickers.length > 0) {
-    try {
+  try {
+    const fxQuote: any = await yahooFinance.quote('USDINR=X')
+    if (fxQuote && fxQuote.regularMarketPrice) {
+      fxRate = fxQuote.regularMarketPrice
+    }
+
+    // Fetch FX History for trend graph (Last 7 days)
+    const sevenDaysAgo = new Date()
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7)
+    const fxChart = await yahooFinance.chart('USDINR=X', {
+      period1: sevenDaysAgo,
+      interval: '1h'
+    })
+    if (fxChart && fxChart.quotes) {
+      fxHistory = fxChart.quotes.map((q: any) => ({
+        date: q.date,
+        value: q.close
+      })).filter((q: any) => q.value != null)
+    }
+
+    // Fetch Benchmark (SPY) for comparison
+    const thirtyDaysAgo = new Date()
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+    const benchmarkResults = await yahooFinance.chart('SPY', {
+      period1: thirtyDaysAgo,
+      interval: '1d'
+    })
+    const benchmarkData = benchmarkResults.quotes.map((q: any) => ({
+      date: q.date,
+      value: q.close
+    })).filter((q: any) => q.value != null)
+
+    if (tickers.length > 0) {
       const quotes: any = await yahooFinance.quote(tickers)
       const quotesArray = Array.isArray(quotes) ? quotes : [quotes]
       quotesArray.forEach((q: any) => {
@@ -55,11 +89,9 @@ export async function GET() {
       profiles.forEach(p => {
         sectors[p.ticker] = p.sector
       })
-      
-    } catch (e) {
-      console.error('Yahoo Finance Error:', e)
-      // gracefully fail and return without live prices, dashboard uses fallback
     }
+  } catch (e) {
+    console.error('Yahoo Finance Error:', e)
   }
 
   return NextResponse.json({
@@ -68,6 +100,9 @@ export async function GET() {
     performance,
     account,
     livePrices,
-    sectors
+    sectors,
+    fxRate,
+    fxHistory,
+    benchmarkData
   })
 }

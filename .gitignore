@@ -3,3 +3,7 @@ frontend/.next
 frontend/node_modules
 frontend/.env
 venv/
+utils/__pycache__
+tests/__pycache__
+__pycache__
+execution/__pycache__
