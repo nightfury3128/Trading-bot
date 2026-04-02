@@ -1,4 +1,3 @@
-import os
 from db.account import update_cash
 from db.portfolio import get_portfolio
 from utils.logger import log
