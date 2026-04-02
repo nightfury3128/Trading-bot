@@ -10,7 +10,7 @@ from config import (
     INDUSTRY_CAP,
 )
 from utils.logger import log
-from utils.time_utils import days_since
+from utils.time_utils import days_since, business_days_since
 from db.portfolio import get_portfolio, remove_position, add_position
 from db.trades import log_trade, get_recent_sells
 from strategy.risk import calculate_industry_exposures, check_industry_cap
@@ -25,7 +25,7 @@ def run_sell_phase(positions: dict, prices: dict, scores: dict, cash: float) -> 
         if price is None:
             continue
 
-        hold_days = days_since(pos["buy_date"])
+        hold_days = business_days_since(pos["buy_date"])
         buy_price = float(pos["buy_price"])
         shares = float(pos["shares"])
 

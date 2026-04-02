@@ -20,12 +20,7 @@ from data.fetch import fetch_sp500_tickers, bulk_download_by_ticker
 from data.features import prepare_ml_dataframe
 from models.train import train_and_score
 
-from strategy.ranking import (
-    get_market_regime,
-    normalize_scores,
-    rank_candidates,
-    check_recent_buy_activity,
-)
+from strategy.ranking import get_market_regime, normalize_scores, rank_candidates
 from strategy.risk import calculate_industry_exposures
 from execution.trading import run_sell_phase, run_buy_phase
 
@@ -101,8 +96,12 @@ def main():
         top_picks = []
         if MODE == "OPEN":
             # Constraint 4: skip BUY if portfolio already has recent buys (within last 3 days)
-            if check_recent_buy_activity(portfolio, days=3):
-                log.info("Skipping BUY phase (Rule 4): Active trading safeguard (Recent Buy)")
+            recent_buys = [p for p in portfolio if days_since(p["buy_date"]) < 3]
+            if recent_buys:
+                log.info(
+                    "Skipping BUY phase (Rule 4): Recent buy activity detected: %s",
+                    [b["ticker"] for b in recent_buys],
+                )
             elif not market_regime_bullish:
                 log.info("BUY disabled: Market Regime is BEARISH (MA50 < MA200)")
             else:

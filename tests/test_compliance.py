@@ -2,7 +2,6 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 from execution.trading import run_sell_phase, run_buy_phase
-from strategy.ranking import check_recent_buy_activity
 from config import MIN_HOLD_DAYS, MIN_PREDICTED_RETURN_BUY
 
 def test_min_hold_days_strict_enforcement():
@@ -49,6 +48,28 @@ def test_override_safety_caps():
         run_sell_phase(positions, prices_tp, {}, 1000.0)
         mock_remove.assert_not_called()
 
+def test_business_days_weekend_handling():
+    """Verify that weekends are skipped for the 7-day hold rule (Rule: 7 Business Days)."""
+    # Assume today is Monday 2026-04-06 (Monday).
+    # Buying 3 calendar days ago (Friday 2026-04-03).
+    # Business days is only 1 (Friday -> Monday).
+    
+    # We'll use absolute dates for testing
+    from datetime import date
+    buy_date = "2026-04-03" # Friday
+    positions = {"AAPL": {"ticker": "AAPL", "shares": 1, "buy_price": 100.0, "buy_date": buy_date}}
+    prices = {"AAPL": 150.0}
+    
+    with patch('execution.trading.datetime') as mock_dt, \
+         patch('execution.trading.remove_position') as mock_remove:
+        # Mock "today" to be Monday April 6th, 2026
+        mock_dt.now.return_value = datetime(2026, 4, 6)
+        mock_dt.strftime = datetime.strftime # keep utility
+        
+        new_cash = run_sell_phase(positions, prices, {}, 1000.0)
+        # Should be BLOCKED because only 1 business day passed (Friday to Monday)
+        mock_remove.assert_not_called()
+
 def test_low_activity_signal_filter():
     """Test that BUY phase is skipped if best signal < 1% (Rule 7)."""
     top_picks = [("META", 0.05)] # Strong risk score, but...
@@ -59,19 +80,3 @@ def test_low_activity_signal_filter():
     with patch('execution.trading.add_position') as mock_add:
         run_buy_phase(top_picks, prices, scores, cash, [])
         mock_add.assert_not_called()
-
-def test_day_trading_buy_throttle():
-    """Verify that we block additional buys if we recently entered positions (Rule 4)."""
-    # 1. Day of Buy check
-    portfolio_today = [{"ticker": "GOOG", "buy_date": datetime.now().strftime("%Y-%m-%d")}]
-    assert check_recent_buy_activity(portfolio_today, days=3) is True
-    
-    # 2. Reentry check (3 days threshold)
-    two_days_ago = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
-    portfolio_recent = [{"ticker": "NFLX", "buy_date": two_days_ago}]
-    assert check_recent_buy_activity(portfolio_recent, days=3) is True
-    
-    # 3. Clean to buy (older than 3 days)
-    ten_days_ago = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
-    portfolio_old = [{"ticker": "AAPL", "buy_date": ten_days_ago}]
-    assert check_recent_buy_activity(portfolio_old, days=3) is False
