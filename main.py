@@ -52,18 +52,33 @@ def main():
         
         filter_map = bulk_download_by_ticker(all_market_tickers, "6mo")
 
-        # Momentum Filter
-        ranked_mom = []
+        # Momentum Filter (Split by Market to prevent starving)
+        US_PER_MARKET = TOP_ML_COUNT // 2
+        
+        mom_us = []
+        mom_in = []
+        
         for t, df in filter_map.items():
             if len(df) < 50:
                 continue
             px = df["Close"].astype(float)
             mom = float(px.iloc[-1] / px.iloc[-21] - 1.0)
             if mom > 0:
-                ranked_mom.append((t, mom))
+                if t.endswith(".NS"):
+                    mom_in.append((t, mom))
+                else:
+                    mom_us.append((t, mom))
 
-        ranked_mom.sort(key=lambda x: -x[1])
-        top_tickers = [t for t, _ in ranked_mom[:TOP_ML_COUNT]]
+        mom_us.sort(key=lambda x: -x[1])
+        mom_in.sort(key=lambda x: -x[1])
+        
+        top_us = [t for t, _ in mom_us[:US_PER_MARKET]]
+        top_in = [t for t, _ in mom_in[:US_PER_MARKET]]
+        
+        log.info("Momentum Filter: US=%d/%d, INDIA=%d/%d", 
+                 len(top_us), len(mom_us), len(top_in), len(mom_in))
+        
+        top_tickers = list(set(top_us + top_in))
 
         # ML Scoring
         scores, vol_map, prices = {}, {}, {}
@@ -98,14 +113,14 @@ def main():
         # US SELLS (Only US tickers, impact US cash)
         us_positions = {t: p for t, p in positions.items() if not t.endswith(".NS")}
         if us_positions:
-            new_cash_usd = run_sell_phase_local(us_positions, prices, scores, cash_usd, "USD")
+            new_cash_usd = run_sell_phase_local(us_positions, prices, scores, cash_usd, "USD", vol_map=vol_map)
             if new_cash_usd > cash_usd: proceeds_generated = True
             cash_usd = new_cash_usd
         
         # IN SELLS (Only Indian tickers, impact Indian cash)
         in_positions = {t: p for t, p in positions.items() if t.endswith(".NS")}
         if in_positions:
-            new_cash_inr = run_sell_phase_local(in_positions, prices, scores, cash_inr, "INR")
+            new_cash_inr = run_sell_phase_local(in_positions, prices, scores, cash_inr, "INR", vol_map=vol_map)
             if new_cash_inr > cash_inr: proceeds_generated = True
             cash_inr = new_cash_inr
 
@@ -114,8 +129,35 @@ def main():
         positions = {p["ticker"]: p for p in portfolio}
 
         # 2. SEPARATE BUY PHASES
+        def get_best_candidates(market_type: str, owned_tickers: list):
+            # market_type: "USD" or "INR"
+            is_in = (market_type == "INR")
+            market_cands = []
+            
+            scanned_count = 0
+            for t in scores.keys():
+                is_ticker_in = t.endswith(".NS")
+                if is_ticker_in == is_in:
+                    scanned_count += 1
+                    if t not in owned_tickers:
+                        pred = float(scores[t])
+                        vol = float(vol_map.get(t, 0.02))
+                        score = pred / (1 + vol)
+                        market_cands.append((t, score))
+            
+            # Sort by risk-adjusted score
+            market_cands.sort(key=lambda x: -x[1])
+            
+            # Select TOP 15
+            final_selection = market_cands[:15]
+            
+            log.info("[%s Selection] Scanned: %d | Eligible: %d | Selected: %d", 
+                     market_type, scanned_count, len(market_cands), len(final_selection))
+            return final_selection
+
         top_picks_combined = []
         def is_recent_buy(p): return days_since(p["buy_date"]) < 3
+        owned = list(positions.keys())
         
         # A. US BUYS
         recent_buys_us = [p for t, p in positions.items() if not t.endswith(".NS") and is_recent_buy(p)]
@@ -124,18 +166,10 @@ def main():
         elif not market_regime_bullish:
             log.info("US BUY disabled: BEARISH SPY")
         else:
-            eligible_us = [(t, s) for t, s in ranked_candidates if not t.endswith(".NS")]
-            top_us = []
-            for t, _ in eligible_us:
-                if scores.get(t, 0) > MIN_PREDICTED_RETURN and t not in positions:
-                    v = vol_map.get(t, 0.02)
-                    rs = scores[t] / (v if v > 0 else 0.02)
-                    top_us.append((t, rs))
-                if len(top_us) >= TOP_BUY_PICKS: break
-            
-            if top_us:
+            candidates_us = get_best_candidates("USD", owned)
+            if candidates_us:
                 cash_usd = run_buy_phase_local(
-                    top_us,
+                    candidates_us,
                     prices,
                     scores,
                     cash_usd,
@@ -144,21 +178,13 @@ def main():
                     other_cash=cash_inr,
                     vol_map=vol_map,
                 )
-                top_picks_combined.extend(top_us)
+                top_picks_combined.extend(candidates_us)
 
         # B. IN BUYS
-        eligible_in = [(t, s) for t, s in ranked_candidates if t.endswith(".NS")]
-        top_in = []
-        for t, _ in eligible_in:
-            if scores.get(t, 0) > MIN_PREDICTED_RETURN and t not in positions:
-                v = vol_map.get(t, 0.02)
-                rs = scores[t] / (v if v > 0 else 0.02)
-                top_in.append((t, rs))
-            if len(top_in) >= TOP_BUY_PICKS: break
-
-        if top_in:
+        candidates_in = get_best_candidates("INR", owned)
+        if candidates_in:
             cash_inr = run_buy_phase_local(
-                top_in,
+                candidates_in,
                 prices,
                 scores,
                 cash_inr,
@@ -167,7 +193,7 @@ def main():
                 other_cash=cash_usd,
                 vol_map=vol_map,
             )
-            top_picks_combined.extend(top_in)
+            top_picks_combined.extend(candidates_in)
 
         # Wrap up (Updated separate cash columns)
         update_cash(cash_usd, cash_inr)
@@ -210,7 +236,7 @@ def main():
 
     log.info("========== BOT RUN END wall_ms=%.2f ==========", _dt(RUN_T0))
 
-def run_sell_phase_local(positions, prices, scores, cash, currency_filter):
+def run_sell_phase_local(positions, prices, scores, cash, currency_filter, vol_map=None):
     """Helper to run sell phase and return local currency cash."""
     from execution.trading import get_strategy
     log.info("---------- SELL PHASE (%s) ----------", currency_filter)
@@ -218,7 +244,8 @@ def run_sell_phase_local(positions, prices, scores, cash, currency_filter):
         px = prices.get(t)
         if px is None: continue
         strategy = get_strategy(t)
-        res, proceeds = strategy.handle_sell(t, pos, px, scores.get(t))
+        vol = vol_map.get(t, 0.02) if vol_map else 0.02
+        res, proceeds = strategy.handle_sell(t, pos, px, scores.get(t), volatility=vol)
         if res:
             cash += proceeds
             log.info("Execution (%s): Sold %s @ %.2f -> Proceeds: %.2f", currency_filter, t, px, proceeds)

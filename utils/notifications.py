@@ -18,7 +18,7 @@ def send_discord(message: str):
 
 from utils.currency import get_currency, get_conversion_rates, format_currency
 
-def discord_trade_alert(action: str, ticker: str, price: float, shares: float):
+def discord_trade_alert(action: str, ticker: str, price: float, shares: float, remaining_shares: float = None, pnl_pct: float = None):
     shares = float(shares)
     price = float(price)
     currency = get_currency(ticker)
@@ -29,13 +29,26 @@ def discord_trade_alert(action: str, ticker: str, price: float, shares: float):
     icon = "🇮🇳" if currency == "INR" else "🇺🇸"
     market_name = "INDIA MARKET" if currency == "INR" else "US MARKET"
     
+    # Partial Sale formatting
+    partial_info = ""
+    is_partial = remaining_shares is not None and remaining_shares > 0
+    if is_partial:
+        total_shares = float(shares + remaining_shares)
+        pct_sold = (shares / total_shares) * 100
+        partial_info = f"\n- **% Sold**: {pct_sold:.1f}%\n- **Remaining**: {remaining_shares:.4f}"
+        action = f"PARTIAL {action.replace('PARTIAL_', '')}"
+
+    pnl_info = ""
+    if pnl_pct is not None:
+        pnl_info = f"\n- **P/L**: {pnl_pct:+.2f}%"
+
     msg = (
         f"**{icon} {market_name} TRADE ALERT**\n"
         f"- Action: {action}\n"
         f"- Ticker: {ticker}\n"
         f"- Net Value: {format_currency(local_allocation, currency, inr_to_usd if currency == 'INR' else None)}\n"
         f"- Price: {format_currency(price, currency)}\n"
-        f"- Shares: {shares:.4f}\n"
+        f"- Shares Sold: {shares:.4f}{pnl_info}{partial_info}\n"
         f"- Time: {datetime.now().strftime('%H:%M:%S')}\n"
     )
     send_discord(msg)
