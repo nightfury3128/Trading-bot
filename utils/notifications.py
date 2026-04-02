@@ -1,23 +1,22 @@
 import os
 import requests
 from datetime import datetime
+from config import DISCORD_WEBHOOK
+from utils.logger import log
 
-# ===== CONFIG =====
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")  # set this in your environment
 
-# ===== CORE FUNCTION =====
-def send_discord(message):
+def send_discord(message: str):
     if not DISCORD_WEBHOOK:
-        print("Discord webhook not set (DISCORD_WEBHOOK).")
+        log.warning("Discord webhook not set (DISCORD_WEBHOOK).")
         return
 
     try:
         requests.post(DISCORD_WEBHOOK, json={"content": message})
     except Exception as e:
-        print("Discord error:", e)
+        log.error("Discord error: %s", e)
 
-# ===== TRADE ALERT =====
-def discord_trade_alert(action, ticker, price, shares):
+
+def discord_trade_alert(action: str, ticker: str, price: float, shares: float):
     shares = float(shares)
     price = float(price)
     allocation = shares * price
@@ -32,24 +31,24 @@ def discord_trade_alert(action, ticker, price, shares):
     )
     send_discord(msg)
 
-# ===== PORTFOLIO SUMMARY =====
+
 def discord_portfolio_summary(
     *,
-    run_date,
-    cash,
-    invested,
-    total_value,
-    pl_unrealized=None,
-    top_picks=None,
-    positions=None,
-    prices=None,
-    position_actions=None,
+    run_date: str,
+    cash: float,
+    invested: float,
+    total_value: float,
+    pl_unrealized: float = None,
+    top_picks: list = None,
+    positions: dict = None,
+    prices: dict = None,
+    position_actions: dict = None,
 ):
     positions = positions or {}
     prices = prices or {}
     top_picks = top_picks or []
     position_actions = position_actions or {}
-    msg ="@everyone"
+    msg = "@everyone\n"
     msg += f"**PORTFOLIO UPDATE** ({run_date})\n\n"
     msg += f"**Amount Invested**: ${invested:.2f}\n"
     msg += f"**Capital Left**: ${cash:.2f}\n"
@@ -89,12 +88,12 @@ def discord_portfolio_summary(
 
     send_discord(msg)
 
-# ===== NO TRADE ALERT =====
+
 def discord_no_trade():
     msg = "**No valid trading signals today.**"
     send_discord(msg)
 
-# ===== ERROR ALERT =====
-def discord_error(error_msg):
+
+def discord_error(error_msg: str):
     msg = f"**BOT ERROR**\n{error_msg}"
     send_discord(msg)
