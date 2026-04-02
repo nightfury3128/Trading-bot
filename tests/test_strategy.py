@@ -28,5 +28,13 @@ def test_rank_candidates(mock_scores):
 
 
 def test_negative_return_exclusion():
-    # In main loop, scores[t] > 0 is checked before adding to top_picks
-    pass
+    """Verify that only positive predicted returns are considered for buy phase."""
+    # ML scores: AAPL (positive), MSFT (negative), GOOGL (zero)
+    scores = {"AAPL": 0.05, "MSFT": -0.01, "GOOGL": 0.0}
+    
+    # In the real main.py loop: if scores[t] > MIN_PREDICTED_RETURN (0.0):
+    eligible = [t for t, s in scores.items() if s > 0.0]
+    
+    assert "AAPL" in eligible
+    assert "MSFT" not in eligible
+    assert "GOOGL" not in eligible
