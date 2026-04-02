@@ -127,6 +127,36 @@ export default function Dashboard() {
   const totalValue = displayCash + totalCurrentValue
   const unrealizedPnL = totalCurrentValue - totalInvestedValue
 
+  // Realized Profit Calculation
+  let totalRealizedPnL = 0
+  const allTradesClean = data.allTrades || []
+  
+  allTradesClean.forEach((t: any) => {
+    // Filter by market
+    const isIndian = t.ticker.endsWith('.NS')
+    if (marketFilter === 'US' && isIndian) return
+    if (marketFilter === 'INDIA' && !isIndian) return
+    
+    // Only count sells/exits for realized profit
+    // (Strategies can emit MODEL_SELL as well.)
+    const action = String(t.action || '').toUpperCase()
+    const isExit = ['SELL', 'STOP_LOSS', 'TAKE_PROFIT', 'MODEL_SELL'].includes(action)
+    if (!isExit) return
+    
+    let pnl = Number(t.realized_pnl)
+    if (!Number.isFinite(pnl)) pnl = 0
+    const tickerCurrency = isIndian ? 'INR' : 'USD'
+    
+    // Convert to display currency
+    if (displayCurrency === 'INR' && tickerCurrency === 'USD') {
+      pnl *= fxRate
+    } else if (displayCurrency === 'USD' && tickerCurrency === 'INR') {
+      pnl /= fxRate
+    }
+    
+    totalRealizedPnL += pnl
+  })
+
   let dailyChange = 0
   if (performance && performance.length >= 2) {
     const last = performance[performance.length - 1].total_value
@@ -204,6 +234,7 @@ export default function Dashboard() {
           dailyChange={dailyChange} 
           investedAmount={totalInvestedValue}
           unrealizedPnL={unrealizedPnL}
+          realizedPnL={totalRealizedPnL}
           currency={displayCurrency}
         />
 

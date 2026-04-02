@@ -10,7 +10,7 @@ from utils.notifications import (
     discord_portfolio_summary,
 )
 
-from config import TOP_ML_COUNT, TOP_BUY_PICKS, MIN_PREDICTED_RETURN, MIN_PREDICTED_RETURN_BUY, INDUSTRY_CAP
+from config import TOP_ML_COUNT, TOP_BUY_PICKS, MIN_PREDICTED_RETURN, MIN_PREDICTED_RETURN_BUY, INDUSTRY_CAP_US, INDUSTRY_CAP_IN
 from db.account import get_account, update_cash
 from db.portfolio import get_portfolio
 from db.performance import log_performance
@@ -31,11 +31,6 @@ def main():
 
     # Get conversion rates once for the run
     inr_to_usd, usd_to_inr = get_conversion_rates()
-
-    # Rule 10: Time-based execution
-    hour_utc = datetime.now().hour
-    MODE = "OPEN" if hour_utc < 16 else "CLOSE"
-    log.info("Time Check: Hour=%d, MODE=%s", hour_utc, MODE)
 
     try:
         # Initial State (Separate Cash)
@@ -97,75 +92,82 @@ def main():
         z_scores = normalize_scores(scores)
         ranked_candidates = rank_candidates(z_scores)
 
-        # SEPARATE SELL PHASES
+        # 1. SEPARATE SELL PHASES
         proceeds_generated = False
-        if MODE == "CLOSE":
-            # 1. US SELLS (Only US tickers, impact US cash)
-            us_positions = {t: p for t, p in positions.items() if not t.endswith(".NS")}
-            if us_positions:
-                new_cash_usd = run_sell_phase_local(us_positions, prices, scores, cash_usd, "USD")
-                if new_cash_usd > cash_usd:
-                    proceeds_generated = True
-                cash_usd = new_cash_usd
-            
-            # 2. IN SELLS (Only Indian tickers, impact Indian cash)
-            in_positions = {t: p for t, p in positions.items() if t.endswith(".NS")}
-            if in_positions:
-                new_cash_inr = run_sell_phase_local(in_positions, prices, scores, cash_inr, "INR")
-                if new_cash_inr > cash_inr:
-                    proceeds_generated = True
-                cash_inr = new_cash_inr
-        else:
-            log.info("Skipping SELL phase (MODE != CLOSE)")
+        
+        # US SELLS (Only US tickers, impact US cash)
+        us_positions = {t: p for t, p in positions.items() if not t.endswith(".NS")}
+        if us_positions:
+            new_cash_usd = run_sell_phase_local(us_positions, prices, scores, cash_usd, "USD")
+            if new_cash_usd > cash_usd: proceeds_generated = True
+            cash_usd = new_cash_usd
+        
+        # IN SELLS (Only Indian tickers, impact Indian cash)
+        in_positions = {t: p for t, p in positions.items() if t.endswith(".NS")}
+        if in_positions:
+            new_cash_inr = run_sell_phase_local(in_positions, prices, scores, cash_inr, "INR")
+            if new_cash_inr > cash_inr: proceeds_generated = True
+            cash_inr = new_cash_inr
 
         # Refresh state for Buy phase
         portfolio = get_portfolio()
         positions = {p["ticker"]: p for p in portfolio}
 
-        # SEPARATE BUY PHASES
+        # 2. SEPARATE BUY PHASES
         top_picks_combined = []
-        # Re-invest immediately if proceeds were generated, otherwise follow MODE == OPEN rule
-        if MODE == "OPEN" or proceeds_generated:
-            if proceeds_generated and MODE != "OPEN":
-                log.info("Immediate Re-investment: Sell proceeds detected, running BUY phase during CLOSE")
-                
-            def is_recent_buy(p): return days_since(p["buy_date"]) < 3
-            
-            # 1. US BUYS
-            recent_buys_us = [p for t, p in positions.items() if not t.endswith(".NS") and is_recent_buy(p)]
-            if recent_buys_us:
-                log.info("Skipping US BUY (Rule 4): Recent activity")
-            elif not market_regime_bullish:
-                log.info("US BUY disabled: BEARISH SPY")
-            else:
-                eligible_us = [(t, s) for t, s in ranked_candidates if not t.endswith(".NS")]
-                top_us = []
-                for t, _ in eligible_us:
-                    if scores.get(t, 0) > MIN_PREDICTED_RETURN and t not in positions:
-                        v = vol_map.get(t, 0.02)
-                        rs = scores[t] / (v if v > 0 else 0.02)
-                        top_us.append((t, rs))
-                    if len(top_us) >= TOP_BUY_PICKS: break
-                
-                if top_us:
-                    cash_usd = run_buy_phase_local(top_us, prices, scores, cash_usd, portfolio, "USD")
-                    top_picks_combined.extend(top_us)
-
-            # 2. IN BUYS
-            eligible_in = [(t, s) for t, s in ranked_candidates if t.endswith(".NS")]
-            top_in = []
-            for t, _ in eligible_in:
+        def is_recent_buy(p): return days_since(p["buy_date"]) < 3
+        
+        # A. US BUYS
+        recent_buys_us = [p for t, p in positions.items() if not t.endswith(".NS") and is_recent_buy(p)]
+        if recent_buys_us:
+            log.info("Skipping US BUY (Rule 4): Recent activity")
+        elif not market_regime_bullish:
+            log.info("US BUY disabled: BEARISH SPY")
+        else:
+            eligible_us = [(t, s) for t, s in ranked_candidates if not t.endswith(".NS")]
+            top_us = []
+            for t, _ in eligible_us:
                 if scores.get(t, 0) > MIN_PREDICTED_RETURN and t not in positions:
                     v = vol_map.get(t, 0.02)
                     rs = scores[t] / (v if v > 0 else 0.02)
-                    top_in.append((t, rs))
-                if len(top_in) >= TOP_BUY_PICKS: break
+                    top_us.append((t, rs))
+                if len(top_us) >= TOP_BUY_PICKS: break
+            
+            if top_us:
+                cash_usd = run_buy_phase_local(
+                    top_us,
+                    prices,
+                    scores,
+                    cash_usd,
+                    portfolio,
+                    "USD",
+                    other_cash=cash_inr,
+                    vol_map=vol_map,
+                )
+                top_picks_combined.extend(top_us)
 
-            if top_in:
-                cash_inr = run_buy_phase_local(top_in, prices, scores, cash_inr, portfolio, "INR")
-                top_picks_combined.extend(top_in)
-        else:
-            log.info("Skipping BUY phase (MODE != OPEN and no sell proceeds to reinvest)")
+        # B. IN BUYS
+        eligible_in = [(t, s) for t, s in ranked_candidates if t.endswith(".NS")]
+        top_in = []
+        for t, _ in eligible_in:
+            if scores.get(t, 0) > MIN_PREDICTED_RETURN and t not in positions:
+                v = vol_map.get(t, 0.02)
+                rs = scores[t] / (v if v > 0 else 0.02)
+                top_in.append((t, rs))
+            if len(top_in) >= TOP_BUY_PICKS: break
+
+        if top_in:
+            cash_inr = run_buy_phase_local(
+                top_in,
+                prices,
+                scores,
+                cash_inr,
+                portfolio,
+                "INR",
+                other_cash=cash_usd,
+                vol_map=vol_map,
+            )
+            top_picks_combined.extend(top_in)
 
         # Wrap up (Updated separate cash columns)
         update_cash(cash_usd, cash_inr)
@@ -222,10 +224,19 @@ def run_sell_phase_local(positions, prices, scores, cash, currency_filter):
             log.info("Execution (%s): Sold %s @ %.2f -> Proceeds: %.2f", currency_filter, t, px, proceeds)
     return cash
 
-def run_buy_phase_local(top_picks, prices, scores, cash, portfolio, currency):
+def run_buy_phase_local(top_picks, prices, scores, cash, portfolio, currency, other_cash=0.0, vol_map=None):
     """Helper to run buy phase with local currency cash."""
     from execution.trading import run_buy_phase
-    return run_buy_phase(top_picks, prices, scores, cash, portfolio, base_currency=currency)
+    return run_buy_phase(
+        top_picks,
+        prices,
+        scores,
+        cash,
+        portfolio,
+        base_currency=currency,
+        other_cash=other_cash,
+        vol_map=vol_map,
+    )
 
 
 if __name__ == "__main__":

@@ -17,17 +17,19 @@ export async function GET() {
   }
 
   // Fetch Supabase data
-  const [portfolioRes, tradesRes, perfRes, accountRes] = await Promise.all([
+  const [portfolioRes, tradesRes, allTradesRes, perfRes, accountRes] = await Promise.all([
     supabase.from('portfolio').select('*'),
     supabase.from('trades').select('*').order('date', { ascending: false }).limit(20),
+    supabase.from('trades').select('*').order('date', { ascending: false }),
     supabase.from('performance').select('*').order('date', { ascending: true }),
     supabase.from('account').select('*').eq('id', 1).single()
   ])
 
   const portfolio = portfolioRes.data || []
   const trades = tradesRes.data || []
+  const allTrades = allTradesRes.data || []
   const performance = perfRes.data || []
-  const account = accountRes.data || { cash: 0 }
+  const account = accountRes.data || { cash_usd: 0, cash_inr: 0 }
 
   // Fetch live prices and FX rate via Yahoo Finance
   const tickers = portfolio.map((p: any) => p.ticker)
@@ -97,6 +99,7 @@ export async function GET() {
   return NextResponse.json({
     portfolio,
     trades,
+    allTrades,
     performance,
     account,
     livePrices,

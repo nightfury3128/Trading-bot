@@ -8,6 +8,7 @@ export default function PortfolioSummary({
   dailyChange,
   investedAmount,
   unrealizedPnL,
+  realizedPnL = 0,
   currency = 'USD'
 }: { 
   totalValue: number; 
@@ -16,6 +17,7 @@ export default function PortfolioSummary({
   dailyChange: number;
   investedAmount: number;
   unrealizedPnL: number;
+  realizedPnL?: number;
   currency?: 'USD' | 'INR';
 }) {
   const symbol = currency === 'INR' ? '₹' : '$'
@@ -35,7 +37,12 @@ export default function PortfolioSummary({
         icon={unrealizedPnL >= 0 ? <TrendingUp className="w-5 h-5 text-emerald-500" /> : <TrendingDown className="w-5 h-5 text-rose-500" />} 
         valueColor={unrealizedPnL >= 0 ? 'text-emerald-500' : 'text-rose-500'}
       />
-      <Card title="Positions" value={positionsCount.toString()} icon={<Briefcase className="w-5 h-5 text-purple-500" />} />
+      <Card 
+        title="Realized Prof" 
+        value={format(realizedPnL)} 
+        icon={realizedPnL >= 0 ? <TrendingUp className="w-5 h-5 text-emerald-500" /> : <TrendingDown className="w-5 h-5 text-rose-500" />} 
+        valueColor={realizedPnL >= 0 ? 'text-emerald-500' : 'text-rose-500'}
+      />
       <Card 
         title="Daily Change" 
         value={format(dailyChange)} 

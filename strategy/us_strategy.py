@@ -1,5 +1,5 @@
 from datetime import datetime
-from config import STOP_LOSS, TAKE_PROFIT, MIN_HOLD_DAYS, COST_SELL, COST_BUY
+from config import STOP_LOSS_US, TAKE_PROFIT, MIN_HOLD_DAYS, COST_SELL, COST_BUY
 from utils.logger import log
 from utils.time_utils import business_days_since
 from db.portfolio import remove_position, add_position
@@ -23,7 +23,7 @@ def handle_sell(ticker, pos, price, score):
         return None, 0.0
 
     sell_reason = None
-    if price < buy_price * STOP_LOSS:
+    if price < buy_price * STOP_LOSS_US:
         sell_reason = "STOP_LOSS"
     elif price > buy_price * TAKE_PROFIT:
         sell_reason = "TAKE_PROFIT"
@@ -33,9 +33,12 @@ def handle_sell(ticker, pos, price, score):
     if sell_reason:
         execution_price = price * COST_SELL
         proceeds = shares * execution_price
-        log_trade(sell_reason, ticker, execution_price, shares)
+        pnl = (execution_price - buy_price) * shares
+        pnl_pct = ((execution_price / buy_price) - 1) * 100
+        
+        log_trade(sell_reason, ticker, execution_price, shares, pnl=pnl, pnl_pct=pnl_pct)
         remove_position(ticker)
-        log.info("Execution (US): Sold %s: %s @ %.2f (proceeds %.2f)", ticker, sell_reason, execution_price, proceeds)
+        log.info("Execution (US): Sold %s: %s @ %.2f (proceeds %.2f, P/L %.2f)", ticker, sell_reason, execution_price, proceeds, pnl)
         return sell_reason, proceeds
 
     return None, 0.0

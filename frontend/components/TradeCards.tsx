@@ -52,7 +52,7 @@ export default function TradeCards({
       {filteredTrades.map((trade, i) => {
         const action = trade.action.toUpperCase()
         const isBuy = action === 'BUY'
-        const isSell = action === 'SELL' || action === 'STOP_LOSS' || action === 'TAKE_PROFIT'
+        const isSell = action === 'SELL' || action === 'STOP_LOSS' || action === 'TAKE_PROFIT' || action === 'MODEL_SELL'
         
         return (
           <div key={i} className="bg-[#171717] border border-gray-800/80 rounded-xl p-4 flex gap-4 hover:border-gray-700/80 transition-all shadow-md hover:bg-[#1a1a1a] group">
