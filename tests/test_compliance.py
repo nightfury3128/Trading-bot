@@ -2,6 +2,7 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 from execution.trading import run_sell_phase, run_buy_phase
+from strategy.ranking import check_recent_buy_activity
 from config import MIN_HOLD_DAYS, MIN_PREDICTED_RETURN_BUY
 
 def test_min_hold_days_strict_enforcement():
@@ -58,3 +59,19 @@ def test_low_activity_signal_filter():
     with patch('execution.trading.add_position') as mock_add:
         run_buy_phase(top_picks, prices, scores, cash, [])
         mock_add.assert_not_called()
+
+def test_day_trading_buy_throttle():
+    """Verify that we block additional buys if we recently entered positions (Rule 4)."""
+    # 1. Day of Buy check
+    portfolio_today = [{"ticker": "GOOG", "buy_date": datetime.now().strftime("%Y-%m-%d")}]
+    assert check_recent_buy_activity(portfolio_today, days=3) is True
+    
+    # 2. Reentry check (3 days threshold)
+    two_days_ago = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    portfolio_recent = [{"ticker": "NFLX", "buy_date": two_days_ago}]
+    assert check_recent_buy_activity(portfolio_recent, days=3) is True
+    
+    # 3. Clean to buy (older than 3 days)
+    ten_days_ago = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+    portfolio_old = [{"ticker": "AAPL", "buy_date": ten_days_ago}]
+    assert check_recent_buy_activity(portfolio_old, days=3) is False

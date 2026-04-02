@@ -32,3 +32,9 @@ def normalize_scores(scores: dict[str, float]) -> dict[str, float]:
 
 def rank_candidates(z_scores: dict[str, float]) -> list[tuple[str, float]]:
     return sorted(z_scores.items(), key=lambda x: -x[1])
+
+def check_recent_buy_activity(portfolio: list, days: int = 3) -> bool:
+    """Returns True if a buy occurred within 'days', helping prevent active day-trading."""
+    from utils.time_utils import days_since
+    recent_buys = [p for p in portfolio if days_since(p["buy_date"]) < days]
+    return len(recent_buys) > 0
