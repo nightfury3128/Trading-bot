@@ -23,7 +23,7 @@ from strategy.ranking import get_market_regime, normalize_scores, rank_candidate
 from strategy.risk import calculate_industry_exposures, check_industry_cap
 from execution.trading import run_sell_phase, run_buy_phase
 from utils.currency import get_conversion_rates, normalize_to_usd, get_currency
-
+from utils.market_hours import is_market_open
 
 def main():
     RUN_T0 = _t0()
@@ -45,9 +45,17 @@ def main():
         log.info("Startup: cash_usd=%.2f, cash_inr=%.2f, positions=%d total", 
                  cash_usd, cash_inr, len(positions))
 
+        # Market Open Checks
+        us_open = is_market_open("US")
+        india_open = is_market_open("INDIA")
+        
+        if not us_open and not india_open:
+            log.info("All markets closed. Skipping run.")
+            return
+
         # Data Fetching (Both Markets)
-        tickers_us = fetch_sp500_tickers()
-        tickers_in = fetch_nifty500_tickers()
+        tickers_us = fetch_sp500_tickers() if us_open else []
+        tickers_in = fetch_nifty500_tickers() if india_open else []
         all_market_tickers = tickers_us + tickers_in
         
         filter_map = bulk_download_by_ticker(all_market_tickers, "6mo")
@@ -112,17 +120,23 @@ def main():
         
         # US SELLS (Only US tickers, impact US cash)
         us_positions = {t: p for t, p in positions.items() if not t.endswith(".NS")}
-        if us_positions:
-            new_cash_usd = run_sell_phase_local(us_positions, prices, scores, cash_usd, "USD", vol_map=vol_map)
-            if new_cash_usd > cash_usd: proceeds_generated = True
-            cash_usd = new_cash_usd
+        if us_open:
+            if us_positions:
+                new_cash_usd = run_sell_phase_local(us_positions, prices, scores, cash_usd, "USD", vol_map=vol_map)
+                if new_cash_usd > cash_usd: proceeds_generated = True
+                cash_usd = new_cash_usd
+        else:
+            log.info("US market closed")
         
         # IN SELLS (Only Indian tickers, impact Indian cash)
         in_positions = {t: p for t, p in positions.items() if t.endswith(".NS")}
-        if in_positions:
-            new_cash_inr = run_sell_phase_local(in_positions, prices, scores, cash_inr, "INR", vol_map=vol_map)
-            if new_cash_inr > cash_inr: proceeds_generated = True
-            cash_inr = new_cash_inr
+        if india_open:
+            if in_positions:
+                new_cash_inr = run_sell_phase_local(in_positions, prices, scores, cash_inr, "INR", vol_map=vol_map)
+                if new_cash_inr > cash_inr: proceeds_generated = True
+                cash_inr = new_cash_inr
+        else:
+            log.info("India market closed")
 
         # Refresh state for Buy phase
         portfolio = get_portfolio()
@@ -160,40 +174,42 @@ def main():
         owned = list(positions.keys())
         
         # A. US BUYS
-        recent_buys_us = [p for t, p in positions.items() if not t.endswith(".NS") and is_recent_buy(p)]
-        if recent_buys_us:
-            log.info("Skipping US BUY (Rule 4): Recent activity")
-        elif not market_regime_bullish:
-            log.info("US BUY disabled: BEARISH SPY")
-        else:
-            candidates_us = get_best_candidates("USD", owned)
-            if candidates_us:
-                cash_usd = run_buy_phase_local(
-                    candidates_us,
-                    prices,
-                    scores,
-                    cash_usd,
-                    portfolio,
-                    "USD",
-                    other_cash=cash_inr,
-                    vol_map=vol_map,
-                )
-                top_picks_combined.extend(candidates_us)
+        if us_open:
+            recent_buys_us = [p for t, p in positions.items() if not t.endswith(".NS") and is_recent_buy(p)]
+            if recent_buys_us:
+                log.info("Skipping US BUY (Rule 4): Recent activity")
+            elif not market_regime_bullish:
+                log.info("US BUY disabled: BEARISH SPY")
+            else:
+                candidates_us = get_best_candidates("USD", owned)
+                if candidates_us:
+                    cash_usd = run_buy_phase_local(
+                        candidates_us,
+                        prices,
+                        scores,
+                        cash_usd,
+                        portfolio,
+                        "USD",
+                        other_cash=cash_inr,
+                        vol_map=vol_map,
+                    )
+                    top_picks_combined.extend(candidates_us)
 
         # B. IN BUYS
-        candidates_in = get_best_candidates("INR", owned)
-        if candidates_in:
-            cash_inr = run_buy_phase_local(
-                candidates_in,
-                prices,
-                scores,
-                cash_inr,
-                portfolio,
-                "INR",
-                other_cash=cash_usd,
-                vol_map=vol_map,
-            )
-            top_picks_combined.extend(candidates_in)
+        if india_open:
+            candidates_in = get_best_candidates("INR", owned)
+            if candidates_in:
+                cash_inr = run_buy_phase_local(
+                    candidates_in,
+                    prices,
+                    scores,
+                    cash_inr,
+                    portfolio,
+                    "INR",
+                    other_cash=cash_usd,
+                    vol_map=vol_map,
+                )
+                top_picks_combined.extend(candidates_in)
 
         # Wrap up (Updated separate cash columns)
         update_cash(cash_usd, cash_inr)
