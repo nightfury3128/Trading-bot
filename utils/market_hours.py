@@ -46,6 +46,6 @@ def is_market_open(market: str) -> bool:
     if not (start <= time_local <= end):
         log.info(f"[{market}] {current_time_str} | Market status: CLOSED | Reason: Outside hours ({start.strftime('%H:%M')} - {end.strftime('%H:%M')})")
         return False
-        
+
     # log.info(f"[{market}] {current_time_str} | Market status: OPEN")
     return True
