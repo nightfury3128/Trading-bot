@@ -1,6 +1,7 @@
 import logging
-from datetime import datetime
+from datetime import datetime, time as dtime
 import numpy as np
+import pytz
 
 from utils.logger import log
 from utils.time_utils import _t0, _dt, days_since
@@ -25,7 +26,57 @@ from execution.trading import run_sell_phase, run_buy_phase
 from utils.currency import get_conversion_rates, normalize_to_usd, get_currency
 from utils.market_hours import is_market_open
 
+def is_close_to(target_dt, now, tolerance_minutes=5):
+    """Return True if *now* is within ±tolerance_minutes of *target_dt* (both naive, same tz)."""
+    from datetime import timedelta
+    delta = abs((now - target_dt).total_seconds())
+    return delta <= tolerance_minutes * 60
+
+
+def should_run_now():
+    """Return (should_run, window_label) based on US/India schedule windows."""
+    utc_now = datetime.now(pytz.utc)
+
+    ny_tz = pytz.timezone("America/New_York")
+    ist_tz = pytz.timezone("Asia/Kolkata")
+
+    now_ny = utc_now.astimezone(ny_tz)
+    now_ist = utc_now.astimezone(ist_tz)
+
+    # US (New York) schedule times
+    us_windows = [
+        (dtime(9, 30), "US 9:30 AM ET"),
+        (dtime(15, 0), "US 3:00 PM ET"),
+    ]
+
+    # India (IST) schedule times
+    india_windows = [
+        (dtime(9, 15),  "India 9:15 AM IST"),
+        (dtime(12, 0),  "India 12:00 PM IST"),
+        (dtime(14, 0),  "India 2:00 PM IST"),
+        (dtime(15, 30), "India 3:30 PM IST"),
+    ]
+
+    for t, label in us_windows:
+        target = now_ny.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if is_close_to(target, now_ny):
+            return True, label
+
+    for t, label in india_windows:
+        target = now_ist.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        if is_close_to(target, now_ist):
+            return True, label
+
+    return False, None
+
+
 def main():
+    scheduled, window = should_run_now()
+    if not scheduled:
+        log.info("Not scheduled time → skipping run")
+        return
+    log.info("Scheduled window triggered: %s", window)
+
     RUN_T0 = _t0()
     log.info("========== BOT RUN START %s ==========", datetime.now().isoformat())
 
