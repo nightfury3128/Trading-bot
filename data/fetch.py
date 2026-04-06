@@ -77,6 +77,8 @@ def fetch_intraday_ohlcv(tickers: list[str], period: str = "1d") -> dict[str, pd
             log.warning("Intraday bulk download failed for chunk: %s", e)
     return result
 
+
+def bulk_download_by_ticker(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
     result = {}
     if not tickers:
         return result
