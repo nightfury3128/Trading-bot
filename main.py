@@ -26,7 +26,7 @@ from execution.trading import run_sell_phase, run_buy_phase
 from utils.currency import get_conversion_rates, normalize_to_usd, get_currency
 from utils.market_hours import is_market_open
 
-def is_close_to(target_dt, now, tolerance_minutes=5):
+def is_close_to(target_dt, now, tolerance_minutes=30):
     """Return True if *now* is within ±tolerance_minutes of *target_dt* (both naive, same tz)."""
     from datetime import timedelta
     delta = abs((now - target_dt).total_seconds())
