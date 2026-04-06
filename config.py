@@ -39,6 +39,15 @@ TOP_ML_COUNT = 50
 BULK_CHUNK = 120
 MAX_ML_WORKERS = 16
 
+# ===== INTRADAY PARAMETERS (India) =====
+INTRADAY_STOP_LOSS_PCT = 0.02       # 2% stop loss
+INTRADAY_PROFIT_TARGET_PCT = 0.02   # 2% profit target
+INTRADAY_SWING_STOP_LOSS_PCT = 0.07 # 7% stop loss after conversion to swing
+INTRADAY_COOLDOWN_MINUTES = 15      # Minimum minutes between trades per ticker
+INTRADAY_CAPITAL_FRACTION = 0.30    # Max 30% of India cash for intraday
+INTRADAY_CONVERSION_MIN_PNL = 0.01         # 1% PnL required for swing conversion
+INTRADAY_CONVERSION_MIN_CONFIDENCE = 0.60  # Model confidence required for conversion
+
 FEATURE_COLUMNS = [
     "returns",
     "MA20",

@@ -56,7 +56,27 @@ def split_bulk_ohlcv(raw: pd.DataFrame, tickers: list) -> dict[str, pd.DataFrame
     return out
 
 
-def bulk_download_by_ticker(tickers: list[str], period: str) -> dict[str, pd.DataFrame]:
+def fetch_intraday_ohlcv(tickers: list[str], period: str = "1d") -> dict[str, pd.DataFrame]:
+    """Fetch 5-minute intraday OHLCV data for a list of tickers."""
+    result = {}
+    if not tickers:
+        return result
+    for i in range(0, len(tickers), BULK_CHUNK):
+        chunk = tickers[i : i + BULK_CHUNK]
+        try:
+            raw = yf.download(
+                chunk,
+                period=period,
+                interval="5m",
+                group_by="ticker",
+                progress=False,
+                threads=True,
+            )
+            result.update(split_bulk_ohlcv(raw, chunk))
+        except Exception as e:
+            log.warning("Intraday bulk download failed for chunk: %s", e)
+    return result
+
     result = {}
     if not tickers:
         return result

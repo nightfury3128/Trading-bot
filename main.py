@@ -16,7 +16,7 @@ from db.account import get_account, update_cash
 from db.portfolio import get_portfolio
 from db.performance import log_performance
 
-from data.fetch import fetch_sp500_tickers, fetch_nifty500_tickers, bulk_download_by_ticker
+from data.fetch import fetch_sp500_tickers, fetch_nifty500_tickers, bulk_download_by_ticker, fetch_intraday_ohlcv
 from data.features import prepare_ml_dataframe
 from models.train import train_and_score
 
@@ -25,6 +25,7 @@ from strategy.risk import calculate_industry_exposures, check_industry_cap
 from execution.trading import run_sell_phase, run_buy_phase
 from utils.currency import get_conversion_rates, normalize_to_usd, get_currency
 from utils.market_hours import is_market_open
+import strategy.intraday_india as intraday_india
 
 def is_close_to(target_dt, now, tolerance_minutes=30):
     """Return True if *now* is within ±tolerance_minutes of *target_dt* (both naive, same tz)."""
@@ -265,6 +266,17 @@ def main():
         # Wrap up (Updated separate cash columns)
         update_cash(cash_usd, cash_inr)
 
+        # ── INTRADAY PHASE (India only) ──────────────────────────────────────
+        if india_open:
+            cash_inr = run_intraday_phase(
+                cash_inr=cash_inr,
+                scores=scores,
+                prices=prices,
+                ohlcv_daily=ohlcv_1y,
+            )
+            # Persist updated INR cash after intraday activity
+            update_cash(cash_usd, cash_inr)
+
         # Final reporting (Normalized calculation for final total value in USD)
         final_portfolio = get_portfolio()
         final_total_val_usd, _ = calculate_industry_exposures(
@@ -302,6 +314,120 @@ def main():
         except: pass
 
     log.info("========== BOT RUN END wall_ms=%.2f ==========", _dt(RUN_T0))
+
+def run_intraday_phase(
+    cash_inr: float,
+    scores: dict,
+    prices: dict,
+    ohlcv_daily: dict,
+) -> float:
+    """Execute the full intraday trading cycle for the India market.
+
+    Steps:
+      1. Fetch 5-minute OHLCV data for the top India candidates.
+      2. Compute intraday features (VWAP, momentum, volume, volatility).
+      3. If in the EOD window (3:15–3:25 PM IST): evaluate all open intraday
+         positions for swing conversion or exit.
+      4. Otherwise: run intraday sell phase, then intraday buy phase
+         (capped at 30 % of available India cash).
+
+    Returns updated cash_inr.
+    """
+    ist_tz = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(ist_tz)
+
+    log.info("---------- INTRADAY PHASE (India) @ %s ----------", now_ist.strftime("%H:%M IST"))
+
+    # Top India tickers by score (up to 30 candidates)
+    india_scored = sorted(
+        [(t, s) for t, s in scores.items() if t.endswith(".NS")],
+        key=lambda x: -float(x[1]),
+    )
+    india_tickers = [t for t, _ in india_scored[:30]]
+
+    if not india_tickers:
+        log.info("Intraday: no India candidates — skipping")
+        return cash_inr
+
+    # Fetch 5-minute intraday data
+    intraday_raw = fetch_intraday_ohlcv(india_tickers, period="1d")
+
+    # Compute features for each ticker with sufficient data
+    intraday_features: dict = {}
+    for t, df in intraday_raw.items():
+        if len(df) >= 20:
+            intraday_features[t] = intraday_india.compute_intraday_features(df)
+
+    # ── EOD evaluation window ────────────────────────────────────────────────
+    if intraday_india.is_eod_window(now_ist):
+        log.info("Intraday: EOD window detected — evaluating conversion/exit")
+        open_intraday = list(intraday_india._intraday_positions.keys())
+        if open_intraday:
+            proceeds = intraday_india.handle_eod_positions(
+                intraday_tickers=open_intraday,
+                prices=prices,
+                daily_data=ohlcv_daily,
+                model_scores=scores,
+                current_time=now_ist,
+            )
+            cash_inr += proceeds
+            log.info(
+                "Intraday EOD: proceeds returned=%.2f INR | remaining_open=%d",
+                proceeds, len(intraday_india._intraday_positions),
+            )
+        else:
+            log.info("Intraday EOD: no open intraday positions to evaluate")
+        return cash_inr
+
+    # ── Regular intraday cycle ───────────────────────────────────────────────
+
+    # 1. SELL PHASE: evaluate existing intraday positions
+    from db.portfolio import get_portfolio
+    portfolio_map = {p["ticker"]: p for p in get_portfolio()}
+
+    for ticker in list(intraday_india._intraday_positions.keys()):
+        pos = portfolio_map.get(ticker)
+        current_price = prices.get(ticker)
+        if pos is None or current_price is None:
+            intraday_india._intraday_positions.pop(ticker, None)
+            continue
+        df_feat = intraday_features.get(ticker)
+        reason, proceeds = intraday_india.handle_intraday_sell(
+            ticker, pos, current_price, df_feat, now_ist
+        )
+        if reason:
+            cash_inr += proceeds
+
+    # 2. BUY PHASE: capital-controlled intraday buys
+    capital_limit = intraday_india.get_intraday_capital_limit(cash_inr)
+    current_exposure = intraday_india.get_current_intraday_exposure(prices)
+    available_intraday_capital = max(0.0, capital_limit - current_exposure)
+
+    log.info(
+        "Intraday capital: limit=%.2f INR | exposure=%.2f INR | available=%.2f INR",
+        capital_limit, current_exposure, available_intraday_capital,
+    )
+
+    for ticker, _ in india_scored:
+        if available_intraday_capital <= 0:
+            break
+        df_feat = intraday_features.get(ticker)
+        if df_feat is None:
+            continue
+        model_score = float(scores.get(ticker, 0.0))
+        _, capital_spent = intraday_india.handle_intraday_buy(
+            ticker=ticker,
+            df=df_feat,
+            model_score=model_score,
+            available_intraday_capital=available_intraday_capital,
+            current_time=now_ist,
+        )
+        if capital_spent > 0:
+            cash_inr -= capital_spent
+            available_intraday_capital -= capital_spent
+
+    return cash_inr
+
 
 def run_sell_phase_local(positions, prices, scores, cash, currency_filter, vol_map=None):
     """Helper to run sell phase and return local currency cash."""

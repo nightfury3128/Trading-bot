@@ -15,6 +15,7 @@ def add_position(
     usd_val: float = None,
     risk_level: str = None,
     stop_loss: float = None,
+    strategy_type: str = None,
 ):
     data = {
         "ticker": ticker,
@@ -32,6 +33,8 @@ def add_position(
         data["risk_level"] = str(risk_level)
     if stop_loss is not None:
         data["stop_loss"] = float(stop_loss)
+    if strategy_type is not None:
+        data["strategy_type"] = str(strategy_type)
 
     supabase.table("portfolio").insert(data).execute()
 
