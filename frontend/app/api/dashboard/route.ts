@@ -25,7 +25,7 @@ export async function GET() {
     supabase.from('account').select('*').eq('id', 1).single()
   ])
 
-  const portfolio = portfolioRes.data || []
+  const portfolio = (portfolioRes.data || []).filter((p: any) => Number(p.shares) > 0)
   const trades = tradesRes.data || []
   const allTrades = allTradesRes.data || []
   const performance = perfRes.data || []

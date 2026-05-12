@@ -28,7 +28,7 @@ def handle_sell(ticker, pos, price, score, volatility=0.02):
     
     # 1. HARD STOP LOSS (ALWAYS FIRST)
     # Stop loss logic overrides EVERYTHING, even positive signals
-    stop_loss_val = float(pos.get("stop_loss", STOP_LOSS_US))
+    stop_loss_val = float(pos.get("stop_loss") or STOP_LOSS_US)
     if price < buy_price * stop_loss_val:
         sell_reason = "STOP_LOSS"
     
@@ -104,8 +104,6 @@ def handle_sell(ticker, pos, price, score, volatility=0.02):
                      sell_reason, ticker, execution_price, proceeds, realized_pnl)
             
         return sell_reason, proceeds
-
-    return None, 0.0
 
     return None, 0.0
 

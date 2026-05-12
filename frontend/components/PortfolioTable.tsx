@@ -52,8 +52,8 @@ export default function PortfolioTable({
         </thead>
         <tbody className="divide-y divide-gray-800/50">
           {portfolio.map((pos, i) => {
-            const currentPriceNative = livePrices[pos.ticker] || pos.buy_price
-            const buyPriceNative = Number(pos.buy_price)
+            const buyPriceNative = Number(pos.buy_price) || 0
+            const currentPriceNative = livePrices[pos.ticker] || buyPriceNative
             
             const price = convert(currentPriceNative, pos.ticker)
             const buyPrice = convert(buyPriceNative, pos.ticker)
