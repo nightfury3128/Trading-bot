@@ -53,21 +53,22 @@ def test_business_days_weekend_handling():
     # Assume today is Monday 2026-04-06 (Monday).
     # Buying 3 calendar days ago (Friday 2026-04-03).
     # Business days is only 1 (Friday -> Monday).
-    
-    # We'll use absolute dates for testing
+
     from datetime import date
     buy_date = "2026-04-03" # Friday
     positions = {"AAPL": {"ticker": "AAPL", "shares": 1, "buy_price": 100.0, "buy_date": buy_date}}
     prices = {"AAPL": 150.0}
-    
-    with patch('execution.trading.datetime') as mock_dt, \
+
+    # Patch datetime inside time_utils so business_days_since sees Monday as "today"
+    with patch('utils.time_utils.datetime') as mock_dt, \
          patch('execution.trading.remove_position') as mock_remove:
-        # Mock "today" to be Monday April 6th, 2026
-        mock_dt.now.return_value = datetime(2026, 4, 6)
-        mock_dt.strftime = datetime.strftime # keep utility
-        
+        mock_now = MagicMock()
+        mock_now.date.return_value = date(2026, 4, 6)  # Monday
+        mock_dt.now.return_value = mock_now
+        mock_dt.strptime = datetime.strptime  # preserve strptime
+
         new_cash = run_sell_phase(positions, prices, {}, 1000.0)
-        # Should be BLOCKED because only 1 business day passed (Friday to Monday)
+        # Should be BLOCKED: only 1 business day passed (Friday to Monday) < MIN_HOLD_DAYS=7
         mock_remove.assert_not_called()
 
 def test_non_positive_signal_filter():
