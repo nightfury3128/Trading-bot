@@ -147,6 +147,76 @@ def discord_portfolio_summary(
     send_discord(msg)
 
 
+def discord_us_alert(
+    *,
+    run_date: str,
+    cash_usd: float,
+    top_picks: list = None,
+    would_buy: dict = None,
+    positions: dict = None,
+    prices: dict = None,
+    sell_signals: list = None,
+):
+    """US-only, alert-only summary: signals only — no trades are placed or recorded."""
+    top_picks = top_picks or []
+    would_buy = would_buy or {}
+    positions = positions or {}
+    prices = prices or {}
+    sell_signals = sell_signals or []
+
+    invested = 0.0
+    current_value = 0.0
+    rows = []
+    for ticker, pos in positions.items():
+        if ticker.endswith(".NS"):
+            continue
+        price = float(prices.get(ticker) or 0.0)
+        shares = float(pos.get("shares") or 0.0)
+        buy_price = float(pos.get("buy_price") or 0.0)
+        invested += shares * buy_price
+        current_value += shares * price
+        pnl_pct = ((price / buy_price) - 1) * 100 if buy_price > 0 else 0.0
+        rows.append(f"- **{ticker}**: {shares:.4f} @ ${price:.2f} | P/L: {pnl_pct:+.2f}%")
+
+    total_value = current_value + cash_usd
+
+    msg = "@everyone\n"
+    msg += f"🇺🇸 **US MARKET ALERT** ({run_date})\n"
+    msg += "⚠️ *Alert-only mode — no trades placed or recorded.*\n"
+    msg += f"💰 **Cash**: ${cash_usd:.2f} | **Positions value**: ${current_value:.2f} | **Total**: ${total_value:.2f}\n\n"
+
+    if sell_signals:
+        msg += "🔻 **Sell signals (would sell)**\n"
+        for ticker, reason, pnl_pct in sell_signals:
+            msg += f"- **{ticker}**: {reason} | P/L: {pnl_pct:+.2f}%\n"
+        msg += "\n"
+
+    if would_buy:
+        msg += "🟢 **Buy signals (would buy)**\n"
+        for ticker, info in would_buy.items():
+            price = float(prices.get(ticker) or 0.0)
+            msg += (
+                f"- **{ticker}**: ${float(info.get('allocation', 0)):.2f} "
+                f"({float(info.get('weight', 0)) * 100:.1f}%) @ ${price:.2f} "
+                f"≈ {float(info.get('shares', 0)):.4f} shares\n"
+            )
+        msg += "\n"
+    elif top_picks:
+        msg += "🟢 **Top US picks**\n"
+        for ticker, score in top_picks[:5]:
+            price = float(prices.get(ticker) or 0.0)
+            msg += f"- **{ticker}**: score {score:.4f} @ ${price:.2f}\n"
+        msg += "\n"
+
+    if rows:
+        msg += "📌 **Current US positions**\n" + "\n".join(rows[:10]) + "\n"
+
+    if not sell_signals and not would_buy and not top_picks:
+        msg += "No valid US trading signals today.\n"
+
+    send_discord(msg)
+
+
 def discord_no_trade():
     msg = "**No valid trading signals today.**"
     send_discord(msg)

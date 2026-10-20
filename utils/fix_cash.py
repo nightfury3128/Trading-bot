@@ -3,7 +3,7 @@ from db.portfolio import get_portfolio
 from utils.logger import log
 
 
-def fix_cash(starting_balance: float = 500.00):
+def fix_cash(starting_balance: float = 258.00):
     log.info("Fetching active positions from portfolio table...")
     portfolio = get_portfolio()
 

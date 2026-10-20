@@ -1,9 +1,10 @@
 from datetime import datetime
-from db.supabase_client import supabase
+
+from db.supabase_client import execute, fetch_all, fetch_one
 
 
 def get_portfolio():
-    return supabase.table("portfolio").select("*").execute().data or []
+    return fetch_all("select * from portfolio order by ticker")
 
 
 def add_position(
@@ -16,55 +17,45 @@ def add_position(
     risk_level: str = None,
     stop_loss: float = None,
 ):
-    data = {
-        "ticker": ticker,
-        "shares": float(shares),
-        "buy_price": float(price),
-        "buy_date": datetime.now().strftime("%Y-%m-%d"),
-        "currency": currency,
-        "local_value": float(local_val) if local_val is not None else float(shares * price),
-        # If local_val was USD already, caller should pass usd_val; otherwise default conversion happens upstream.
-        "usd_value": float(usd_val) if usd_val is not None else float(shares * price),
-    }
-
-    # Supabase table extension: risk_level/stop_loss are optional.
-    if risk_level is not None:
-        data["risk_level"] = str(risk_level)
-    if stop_loss is not None:
-        data["stop_loss"] = float(stop_loss)
-
-    supabase.table("portfolio").insert(data).execute()
+    execute(
+        """
+        insert into portfolio
+            (ticker, shares, buy_price, buy_date, currency, local_value, usd_value, risk_level, stop_loss)
+        values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            ticker,
+            float(shares),
+            float(price),
+            datetime.now().strftime("%Y-%m-%d"),
+            currency,
+            float(local_val) if local_val is not None else float(shares * price),
+            float(usd_val) if usd_val is not None else float(shares * price),
+            str(risk_level) if risk_level is not None else None,
+            float(stop_loss) if stop_loss is not None else None,
+        ),
+    )
 
 
 def update_position(ticker: str, new_shares: float, current_price: float):
-    # Fetch current to preserve some data if needed, but mainly we update shares and calculated values
-    res = supabase.table("portfolio").select("*").eq("ticker", ticker).single().execute()
-    if not res.data:
+    pos = fetch_one("select * from portfolio where ticker = %s", (ticker,))
+    if not pos:
         return
-    
-    pos = res.data
+
     buy_price = float(pos["buy_price"])
     from utils.currency import get_currency, get_conversion_rates
+
     currency = pos.get("currency", get_currency(ticker))
     inr_to_usd, _ = get_conversion_rates()
-    
-    new_local_val = new_shares * buy_price # Book value update? Or current value? 
-    # Usually portfolio table stores "invested" value. But let's check add_position.
-    # add_position uses shares * price (execution price).
-    
-    new_usd_val = new_local_val
-    if currency == "INR":
-        new_usd_val = new_local_val * inr_to_usd
-    
-    data = {
-        "shares": float(new_shares),
-        "local_value": float(new_local_val),
-        "usd_value": float(new_usd_val)
-    }
-    
-    supabase.table("portfolio").update(data).eq("ticker", ticker).execute()
+
+    new_local_val = new_shares * buy_price
+    new_usd_val = new_local_val * inr_to_usd if currency == "INR" else new_local_val
+
+    execute(
+        "update portfolio set shares = %s, local_value = %s, usd_value = %s where ticker = %s",
+        (float(new_shares), float(new_local_val), float(new_usd_val), ticker),
+    )
 
 
 def remove_position(ticker: str):
-    # Constraint removed - we can now delete from portfolio while keeping trade history!
-    supabase.table("portfolio").delete().eq("ticker", ticker).execute()
+    execute("delete from portfolio where ticker = %s", (ticker,))

@@ -1,8 +1,10 @@
 from datetime import datetime
-from db.supabase_client import supabase
+
+from db.supabase_client import execute
 
 
 def log_performance(total_value: float):
-    supabase.table("performance").insert(
-        {"date": datetime.now().strftime("%Y-%m-%d"), "total_value": float(total_value)}
-    ).execute()
+    execute(
+        "insert into performance (date, total_value) values (%s, %s)",
+        (datetime.now().strftime("%Y-%m-%d"), float(total_value)),
+    )

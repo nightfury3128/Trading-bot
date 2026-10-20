@@ -8,9 +8,11 @@ from utils.notifications import (
     discord_error,
     discord_no_trade,
     discord_portfolio_summary,
+    discord_us_alert,
 )
 
-from config import TOP_ML_COUNT, TOP_BUY_PICKS, MIN_PREDICTED_RETURN, MIN_PREDICTED_RETURN_BUY, INDUSTRY_CAP_US, INDUSTRY_CAP_IN
+from config import ALERT_ONLY, MARKET, STOP_LOSS_US, TOP_ML_COUNT, TOP_BUY_PICKS, MIN_HOLD_DAYS, MIN_PREDICTED_RETURN, MIN_PREDICTED_RETURN_BUY, INDUSTRY_CAP_US, INDUSTRY_CAP_IN
+from utils.time_utils import business_days_since
 from db.account import get_account, update_cash
 from db.portfolio import get_portfolio
 from db.performance import log_performance
@@ -45,17 +47,17 @@ def main():
         log.info("Startup: cash_usd=%.2f, cash_inr=%.2f, positions=%d total", 
                  cash_usd, cash_inr, len(positions))
 
-        # Market Open Checks
+        # Market Open Checks — US market only
         us_open = is_market_open("US")
-        india_open = is_market_open("INDIA")
-        
-        if not us_open and not india_open:
-            log.info("All markets closed. Skipping run.")
+        india_open = False
+
+        if not us_open:
+            log.info("US market closed. Skipping run.")
             return
 
-        # Data Fetching (Both Markets)
+        # Data Fetching (US only)
         tickers_us = fetch_sp500_tickers() if us_open else []
-        tickers_in = fetch_nifty500_tickers() if india_open else []
+        tickers_in = []
         all_market_tickers = tickers_us + tickers_in
         
         filter_map = bulk_download_by_ticker(all_market_tickers, "6mo")
@@ -114,6 +116,76 @@ def main():
         # Normalization and Ranking
         z_scores = normalize_scores(scores)
         ranked_candidates = rank_candidates(z_scores)
+
+        # ===== ALERT-ONLY MODE (US only): Discord alert, no trades / DB writes =====
+        if ALERT_ONLY:
+            log.info("ALERT_ONLY mode: computing US signals only, no trades will be placed or recorded.")
+
+            # Sell signals for existing US positions (mirrors us_strategy thresholds, without executing)
+            sell_signals = []
+            for t, p in positions.items():
+                if t.endswith(".NS"):
+                    continue
+                px = prices.get(t)
+                if px is None or business_days_since(p["buy_date"]) < MIN_HOLD_DAYS:
+                    continue
+                buy_px = float(p["buy_price"])
+                pred = float(scores.get(t) or 0.0)
+                pnl_pct = ((px / buy_px) - 1) * 100 if buy_px > 0 else 0.0
+                stop_loss_val = float(p.get("stop_loss") or STOP_LOSS_US)
+                reason = None
+                if px < buy_px * stop_loss_val:
+                    reason = "STOP_LOSS"
+                elif pred < -0.01:
+                    reason = "NEGATIVE_SIGNAL"
+                elif pred < 0.1 and pnl_pct < 0:
+                    reason = "RISK_REDUCTION"
+                elif pred < 0.1 and pnl_pct > 0:
+                    reason = "PROFIT_LOCK"
+                elif pnl_pct > 10:
+                    reason = "PROFIT_LOCK"
+                if reason:
+                    sell_signals.append((t, reason, pnl_pct))
+
+            # Hypothetical buy allocations (what the allocator *would* do with the cash)
+            would_buy = {}
+            owned = list(positions.keys())
+            if market_regime_bullish:
+                candidates_us = sorted(
+                    ((t, float(scores[t]) / (1 + float(vol_map.get(t, 0.02))))
+                     for t in scores if not t.endswith(".NS") and t not in owned),
+                    key=lambda x: -x[1],
+                )[:15]
+                if candidates_us:
+                    from strategy.allocator import allocate_portfolio
+                    from config import COST_BUY
+
+                    candidate_tickers = [t for t, _ in candidates_us]
+                    would_buy = allocate_portfolio(
+                        tickers=candidate_tickers,
+                        predictions=scores,
+                        volatilities=vol_map,
+                        prices={t: prices[t] * COST_BUY for t in candidate_tickers if t in prices},
+                        total_capital=cash_usd,
+                        market="USD",
+                    )
+            else:
+                log.info("US BUY alerts disabled: BEARISH SPY")
+
+            discord_us_alert(
+                run_date=datetime.now().strftime("%Y-%m-%d"),
+                cash_usd=cash_usd,
+                top_picks=[(t, scores[t]) for t, _ in sorted(
+                    ((t, s) for t, s in scores.items() if not t.endswith(".NS")),
+                    key=lambda x: -x[1],
+                )[:10]],
+                would_buy=would_buy,
+                positions={t: p for t, p in positions.items() if not t.endswith(".NS")},
+                prices=prices,
+                sell_signals=sell_signals,
+            )
+            log.info("========== BOT RUN END (alert-only) wall_ms=%.2f ==========", _dt(RUN_T0))
+            return
 
         # 1. SEPARATE SELL PHASES
         proceeds_generated = False

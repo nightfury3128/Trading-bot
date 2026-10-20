@@ -1,4 +1,4 @@
-from db.supabase_client import supabase
+from db.supabase_client import execute
 from utils.logger import setup_logger
 
 log = setup_logger("performance_cleaner")
@@ -6,8 +6,7 @@ log = setup_logger("performance_cleaner")
 
 def clear_performance():
     log.info("Deleting all rows from performance table...")
-    # 'id' does not exist in performance table, use 'total_value' > 0 instead
-    supabase.table("performance").delete().filter("total_value", "gt", 0).execute()
+    execute("delete from performance")
     log.info("SUCCESS: Performance table cleared.")
 
 

@@ -31,8 +31,7 @@ jobs:
         
     - name: Test with pytest
       env:
-        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         PYTHONPATH: .
       run: |

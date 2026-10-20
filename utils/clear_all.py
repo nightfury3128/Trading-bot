@@ -1,52 +1,38 @@
 """
-Utility to wipe ALL database tables and reset the account to fresh starting balances.
+Utility to wipe ALL database tables and reset the account to a fresh $258 starting balance.
 Run: python -m utils.clear_all
 """
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from db.supabase_client import supabase
-from utils.logger import setup_logger
+from config import INITIAL_CASH_USD  # noqa: E402
+from db.supabase_client import execute  # noqa: E402
+from utils.logger import setup_logger  # noqa: E402
 
 log = setup_logger("db_cleaner")
 
-STARTING_USD = 500.0
-STARTING_INR = 5000.0
+STARTING_USD = INITIAL_CASH_USD  # $258
+STARTING_INR = 0.0  # US-only mode
 
 
 def clear_all():
-    # 1. Trades (must go first — no FK issues)
-    log.info("Clearing TRADES table...")
-    try:
-        supabase.table("trades").delete().neq("ticker", "").execute()
-        log.info("  ✓ Trades cleared.")
-    except Exception as e:
-        log.error("  ✗ Trades: %s", e)
+    for table in ("trades", "portfolio", "performance"):
+        log.info("Clearing %s table...", table.upper())
+        try:
+            execute(f"delete from {table}")
+            log.info("  ✓ %s cleared.", table)
+        except Exception as e:
+            log.error("  ✗ %s: %s", table, e)
 
-    # 2. Portfolio
-    log.info("Clearing PORTFOLIO table...")
-    try:
-        supabase.table("portfolio").delete().neq("ticker", "").execute()
-        log.info("  ✓ Portfolio cleared.")
-    except Exception as e:
-        log.error("  ✗ Portfolio: %s", e)
-
-    # 3. Performance
-    log.info("Clearing PERFORMANCE table...")
-    try:
-        supabase.table("performance").delete().filter("total_value", "gte", 0).execute()
-        log.info("  ✓ Performance cleared.")
-    except Exception as e:
-        log.error("  ✗ Performance: %s", e)
-
-    # 4. Reset Account cash to starting balances
     log.info("Resetting ACCOUNT to $%.2f USD / ₹%.2f INR...", STARTING_USD, STARTING_INR)
     try:
-        supabase.table("account").update({
-            "cash_usd": STARTING_USD,
-            "cash_inr": STARTING_INR
-        }).eq("id", 1).execute()
+        execute(
+            "insert into account (id, cash_usd, cash_inr) values (1, %s, %s) "
+            "on conflict (id) do update set cash_usd = excluded.cash_usd, cash_inr = excluded.cash_inr",
+            (STARTING_USD, STARTING_INR),
+        )
         log.info("  ✓ Account reset.")
     except Exception as e:
         log.error("  ✗ Account: %s", e)

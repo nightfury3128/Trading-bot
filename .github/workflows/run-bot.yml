@@ -1,16 +1,38 @@
-name: Run trading bot
+name: US Trading Bot — Discord Alerts
 
 on:
-  workflow_dispatch:
-  
+  workflow_dispatch: {}
+  schedule:
+    # US market only (NYSE/NASDAQ, Mon–Fri, 9:30–16:00 America/New_York).
+    # GitHub cron is always UTC and DST shifts ET by an hour, so 14:35 UTC is
+    # used: 09:35 EST (winter) / 10:35 EDT (summer) — inside market hours in
+    # both seasons. The bot also re-checks NYSE hours/holidays itself
+    # (utils/market_hours.py) and exits without alerting when closed.
+    - cron: "35 14 * * 1-5"
+
+concurrency:
+  group: us-trading-bot
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # --- Supabase: direct Postgres connection (Python/psycopg) ---
+      # Secret DATABASE_URL, e.g.:
+      #   postgresql://postgres:<url-encoded-password>@db.ibmhrlcocptfjlwmrkdo.supabase.co:5432/postgres
+      # NOTE: the direct db.* host is IPv6-only. If the "Create Supabase tables"
+      # step fails with a network/DNS error on GitHub's IPv4 runners, paste the
+      # "Session pooler" connection string from Supabase -> Connect instead
+      # (host *.pooler.supabase.com:5432, user postgres.ibmhrlcocptfjlwmrkdo).
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # --- Discord alerting ---
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      # --- Bot mode: US only, alert-only (no trades placed/recorded), $258 start ---
+      MARKET: US
+      ALERT_ONLY: "true"
+      INITIAL_CAPITAL_USD: "258"
       LOG_LEVEL: INFO
     steps:
       - name: Checkout
@@ -20,11 +42,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run bot
-        run: python main.py 
+      - name: Create Supabase tables + seed $258 (idempotent)
+        run: python -m db.init_db
+
+      - name: Run bot (US signals -> Discord alert)
+        run: python main.py
