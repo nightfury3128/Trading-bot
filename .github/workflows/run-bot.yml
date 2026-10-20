@@ -19,13 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # --- Supabase: direct Postgres connection (Python/psycopg) ---
-      # Secret DATABASE_URL, e.g.:
-      #   postgresql://postgres:<url-encoded-password>@db.ibmhrlcocptfjlwmrkdo.supabase.co:5432/postgres
-      # NOTE: the direct db.* host is IPv6-only. If the "Create Supabase tables"
-      # step fails with a network/DNS error on GitHub's IPv4 runners, paste the
-      # "Session pooler" connection string from Supabase -> Connect instead
-      # (host *.pooler.supabase.com:5432, user postgres.ibmhrlcocptfjlwmrkdo).
+      # --- Supabase: Postgres connection (Python/psycopg) ---
+      # REQUIRED in GitHub Actions: the Session pooler string (IPv4), NOT the
+      # direct db.* string (IPv6-only — runners fail with "Network is unreachable",
+      # resolved to a 2600:... address). Get it from Supabase -> Connect ->
+      # Session pooler. It looks like:
+      #   postgresql://postgres.ibmhrlcocptfjlwmrkdo:<url-encoded-password>@aws-1-<region>.pooler.supabase.com:5432/postgres
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       # --- Discord alerting ---
       DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}

@@ -16,6 +16,7 @@ but it no longer uses the supabase-py PostgREST client.
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
+from urllib.parse import urlparse
 
 from config import DATABASE_URL
 from utils.logger import log
@@ -55,7 +56,22 @@ def get_connection():
             "'postgresql://postgres:<password>@db.ibmhrlcocptfjlwmrkdo.supabase.co:5432/postgres' "
             "(locally in .env, in GitHub as the DATABASE_URL secret), or set SUPABASE_DB_PASSWORD."
         )
-    with psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15) as conn:
+    try:
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+    except psycopg.OperationalError as e:
+        host = urlparse(DATABASE_URL).hostname or ""
+        if host.startswith("db.") and host.endswith(".supabase.co"):
+            raise RuntimeError(
+                f"Cannot reach the direct Supabase host {host}: it is IPv6-only and this "
+                "network (e.g. GitHub Actions) is IPv4-only. Replace the DATABASE_URL secret "
+                "with the Session pooler string from Supabase -> Connect -> Session pooler "
+                "(host *.pooler.supabase.com, port 5432, user postgres.ibmhrlcocptfjlwmrkdo), "
+                "or set SUPABASE_POOLER_HOST + SUPABASE_DB_PASSWORD instead."
+            ) from e
+        raise RuntimeError(
+            f"Cannot connect to Supabase Postgres at {host or 'unknown host'}: {e}"
+        ) from e
+    with conn:
         yield conn
 
 

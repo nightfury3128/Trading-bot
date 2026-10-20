@@ -34,8 +34,21 @@ SUPABASE_DB_NAME = (os.environ.get("SUPABASE_DB_NAME") or "postgres").strip()
 SUPABASE_DB_USER = (os.environ.get("SUPABASE_DB_USER") or "postgres").strip()
 SUPABASE_DB_PASSWORD = os.environ.get("SUPABASE_DB_PASSWORD") or ""
 
+# Session pooler (IPv4) — REQUIRED on GitHub Actions: the direct db.* host
+# above is IPv6-only and GitHub runners get "Network is unreachable" on it.
+# Find it in Supabase: Connect -> Session pooler, e.g.
+#   host: aws-1-us-east-1.pooler.supabase.com  port: 5432  user: postgres.ibmhrlcocptfjlwmrkdo
+SUPABASE_POOLER_HOST = (os.environ.get("SUPABASE_POOLER_HOST") or "").strip()
+SUPABASE_POOLER_PORT = int(os.environ.get("SUPABASE_POOLER_PORT") or "5432")
+SUPABASE_POOLER_USER = (os.environ.get("SUPABASE_POOLER_USER") or f"postgres.{SUPABASE_PROJECT_REF}").strip()
+
 DATABASE_URL = (os.environ.get("DATABASE_URL") or "").strip()
-if not DATABASE_URL and SUPABASE_DB_PASSWORD:
+if not DATABASE_URL and SUPABASE_DB_PASSWORD and SUPABASE_POOLER_HOST:
+    DATABASE_URL = (
+        f"postgresql://{SUPABASE_POOLER_USER}:{quote(SUPABASE_DB_PASSWORD, safe='')}"
+        f"@{SUPABASE_POOLER_HOST}:{SUPABASE_POOLER_PORT}/{SUPABASE_DB_NAME}"
+    )
+elif not DATABASE_URL and SUPABASE_DB_PASSWORD:
     DATABASE_URL = (
         f"postgresql://{SUPABASE_DB_USER}:{quote(SUPABASE_DB_PASSWORD, safe='')}"
         f"@{SUPABASE_DB_HOST}:{SUPABASE_DB_PORT}/{SUPABASE_DB_NAME}"
