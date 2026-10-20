@@ -59,8 +59,21 @@ def main():
         tickers_us = fetch_sp500_tickers() if us_open else []
         tickers_in = []
         all_market_tickers = tickers_us + tickers_in
-        
+
+        if not tickers_us:
+            msg = "Failed to fetch any S&P 500 tickers from all sources. Skipping run."
+            log.error(msg)
+            try: discord_error(msg)
+            except Exception: pass
+            return
+
         filter_map = bulk_download_by_ticker(all_market_tickers, "6mo")
+        if not filter_map:
+            msg = f"Yahoo Finance returned no price data for any of the {len(tickers_us)} S&P 500 tickers. Skipping run."
+            log.error(msg)
+            try: discord_error(msg)
+            except Exception: pass
+            return
 
         # Momentum Filter (Split by Market to prevent starving)
         US_PER_MARKET = TOP_ML_COUNT // 2
@@ -69,9 +82,11 @@ def main():
         mom_in = []
         
         for t, df in filter_map.items():
-            if len(df) < 50:
+            if len(df) < 50 or "Close" not in df.columns:
                 continue
-            px = df["Close"].astype(float)
+            px = df["Close"].astype(float).dropna()
+            if len(px) < 21:
+                continue
             mom = float(px.iloc[-1] / px.iloc[-21] - 1.0)
             if mom > 0:
                 if t.endswith(".NS"):
@@ -104,7 +119,20 @@ def main():
                 prices[ticker] = float(df["Close"].dropna().iloc[-1])
 
         if not scores:
-            log.warning("No ML scores generated. Skipping trade cycle.")
+            msg = (
+                "No ML scores generated (momentum candidates: "
+                f"US={len(top_us)}, tickers={len(tickers_us)}, downloaded={len(ohlcv_1y)}). Skipping trade cycle."
+            )
+            log.warning(msg)
+            if ALERT_ONLY:
+                try:
+                    discord_us_alert(
+                        run_date=datetime.now().strftime("%Y-%m-%d"),
+                        cash_usd=cash_usd,
+                        positions={p["ticker"]: p for p in get_portfolio() if not p["ticker"].endswith(".NS")},
+                        prices=prices,
+                    )
+                except Exception: pass
             return
 
         # Print top 5 Indian predictions separately for debug
